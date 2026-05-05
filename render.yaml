@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: aviator-game
+    runtime: node
+    repo: https://github.com/codewarrior1095-jpg/aviator-game
+    plan: free
+    envVars:
+      - key: NODE_VERSION
+        value: 18.17.0
+      - key: NODE_ENV
+        value: production
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/game/state

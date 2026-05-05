@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aviator - Powered by Server Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        /* Your existing styles here */
+        body { font-family: 'Inter', sans-serif; background: #000; }
+        /* ... (copy your existing CSS styles) ... */
+    </style>
+</head>
+<body>
+    <!-- Your existing HTML structure -->
+    <div class="w-full max-w-md mx-auto">
+        <!-- UI Components remain the same -->
+        <div id="gameContainer"></div>
+    </div>
+
+    <script>
+        // Client-side code (NO game logic - just visual representation)
+        const socket = io();
+        
+        let currentMultiplier = 1.00;
+        let gameState = 'WAITING';
+        
+        // Listen for game updates from server (hidden engine)
+        socket.on('game_update', (data) => {
+            currentMultiplier = data.multiplier;
+            gameState = data.state;
+            
+            // Update UI
+            updateDisplay(currentMultiplier, gameState);
+            
+            if (gameState === 'CRASHED') {
+                handleCrash();
+            }
+        });
+        
+        socket.on('game_started', (data) => {
+            resetGameVisuals();
+        });
+        
+        socket.on('bet_confirmed', (data) => {
+            console.log('Bet confirmed:', data);
+            showBetConfirmation(data);
+        });
+        
+        function placeBet(amount) {
+            // Send bet to server for processing
+            socket.emit('place_bet', { amount: amount });
+        }
+        
+        function updateDisplay(multiplier, state) {
+            document.getElementById('multiplierDisplay').innerText = multiplier.toFixed(2) + 'x';
+            
+            if (state === 'CRASHED') {
+                document.getElementById('multiplierDisplay').classList.add('text-red-500');
+                document.getElementById('statusText').style.opacity = '1';
+            } else {
+                document.getElementById('multiplierDisplay').classList.remove('text-red-500');
+            }
+        }
+        
+        function handleCrash() {
+            // Visual effects only - no game logic here
+            document.getElementById('aviator_sound').pause();
+            setTimeout(() => {
+                // Visual reset
+            }, 2500);
+        }
+        
+        function resetGameVisuals() {
+            document.getElementById('statusText').style.opacity = '0';
+            document.getElementById('waitingOverlay').classList.add('hidden');
+        }
+        
+        // Bet buttons event listeners
+        document.querySelectorAll('.bet-button').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const amount = parseFloat(btn.dataset.amount);
+                placeBet(amount);
+            });
+        });
+    </script>
+</body>
+</html>
