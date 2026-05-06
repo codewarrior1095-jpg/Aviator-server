@@ -1,14 +1,21 @@
 services:
   - type: web
-    name: aviator-game
-    runtime: node
-    repo: https://github.com/codewarrior1095-jpg/aviator-game
-    plan: free
-    envVars:
-      - key: NODE_VERSION
-        value: 18.17.0
-      - key: NODE_ENV
-        value: production
+    name: aviator-server
+    env: node
     buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /api/game/state
+    startCommand: node server.js
+    envVars:
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY_ID
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_CLIENT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_CERT_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
