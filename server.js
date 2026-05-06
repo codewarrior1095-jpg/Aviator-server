@@ -12,11 +12,12 @@ import crypto from 'crypto';
 dotenv.config();
 
 // Initialize Firebase Admin with environment variables
-const firebaseConfig = {
+// The private key needs proper formatting - Render sometimes mangles the newlines
+const serviceAccount = {
   type: "service_account",
   project_id: process.env.FIREBASE_PROJECT_ID,
   private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : '',
+  private_key: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
   client_email: process.env.FIREBASE_CLIENT_EMAIL,
   client_id: process.env.FIREBASE_CLIENT_ID,
   auth_uri: "https://accounts.google.com/o/oauth2/auth",
@@ -25,24 +26,37 @@ const firebaseConfig = {
   client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
 };
 
-// Check if Firebase credentials exist before initializing
-try {
-  initializeApp({
-    credential: cert(firebaseConfig)
+let db;
+let firebaseInitialized = false;
+
+// Only initialize Firebase if we have valid credentials
+if (serviceAccount.private_key && serviceAccount.project_id && serviceAccount.client_email) {
+  try {
+    initializeApp({
+      credential: cert(serviceAccount)
+    });
+    db = getFirestore();
+    firebaseInitialized = true;
+    console.log('Firebase initialized successfully');
+  } catch (error) {
+    console.error('Firebase initialization error:', error.message);
+    console.log('Server will run without Firebase. Auth and betting features will be disabled.');
+  }
+} else {
+  console.log('Firebase credentials missing. Server will run in limited mode.');
+  console.log('Missing:', {
+    project_id: !serviceAccount.project_id,
+    private_key: !serviceAccount.private_key,
+    client_email: !serviceAccount.client_email
   });
-  console.log('Firebase initialized successfully');
-} catch (error) {
-  console.error('Firebase initialization error:', error.message);
-  console.log('Server will start but Firebase features may not work');
 }
 
-const db = getFirestore();
 const app = express();
 
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://aviator-server-puy9.onrender.com', 'http://localhost:3000', 'http://localhost:5000'],
+  origin: '*', // Allow all origins for now
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
@@ -64,6 +78,10 @@ const betLimiter = rateLimit({
 
 // Authentication middleware
 const authenticateToken = (req, res, next) => {
+  if (!firebaseInitialized) {
+    return res.status(503).json({ error: 'Service temporarily unavailable - Firebase not configured' });
+  }
+  
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   
@@ -118,12 +136,17 @@ app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: Date.now(),
+    firebase: firebaseInitialized,
     uptime: process.uptime()
   });
 });
 
 // Register user
 app.post('/api/auth/register', async (req, res) => {
+  if (!firebaseInitialized) {
+    return res.status(503).json({ error: 'Service temporarily unavailable' });
+  }
+  
   try {
     const { username, password } = req.body;
     
@@ -154,7 +177,7 @@ app.post('/api/auth/register', async (req, res) => {
     
     const token = jwt.sign(
       { username, userId: username },
-      process.env.JWT_SECRET || 'fallback-secret',
+      process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
     
@@ -173,6 +196,10 @@ app.post('/api/auth/register', async (req, res) => {
 
 // Login user
 app.post('/api/auth/login', async (req, res) => {
+  if (!firebaseInitialized) {
+    return res.status(503).json({ error: 'Service temporarily unavailable' });
+  }
+  
   try {
     const { username, password } = req.body;
     
@@ -196,7 +223,7 @@ app.post('/api/auth/login', async (req, res) => {
     
     const token = jwt.sign(
       { username, userId: username },
-      process.env.JWT_SECRET || 'fallback-secret',
+      process.env.JWT_SECRET,
       { expiresIn: '24h' }
     );
     
@@ -239,7 +266,6 @@ app.post('/api/game/bet', authenticateToken, betLimiter, async (req, res) => {
   try {
     const { amount, autoCashout } = req.body;
     
-    // Validate bet amount
     if (!amount || amount <= 0) {
       return res.status(400).json({ error: 'Invalid bet amount' });
     }
@@ -248,7 +274,6 @@ app.post('/api/game/bet', authenticateToken, betLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Game is not accepting bets' });
     }
     
-    // Check user balance
     const userRef = db.collection('users').doc(req.user.username);
     const userDoc = await userRef.get();
     const userData = userDoc.data();
@@ -257,12 +282,10 @@ app.post('/api/game/bet', authenticateToken, betLimiter, async (req, res) => {
       return res.status(400).json({ error: 'Insufficient balance' });
     }
     
-    // Deduct bet from balance
     await userRef.update({
       balance: userData.balance - amount
     });
     
-    // Record bet
     const betRef = db.collection('bets').doc();
     await betRef.set({
       userId: req.user.username,
@@ -318,7 +341,6 @@ app.post('/api/game/cashout', authenticateToken, async (req, res) => {
     const currentMultiplier = gameState.currentMultiplier;
     const winnings = betData.amount * currentMultiplier;
     
-    // Update bet status
     await betRef.update({
       status: 'cashed_out',
       cashoutMultiplier: currentMultiplier,
@@ -326,13 +348,11 @@ app.post('/api/game/cashout', authenticateToken, async (req, res) => {
       cashedOutAt: new Date().toISOString()
     });
     
-    // Add winnings to user balance
     const userRef = db.collection('users').doc(req.user.username);
     await userRef.update({
       balance: FieldValue.increment(winnings)
     });
     
-    // Get new balance
     const userDoc = await userRef.get();
     
     res.json({
@@ -358,50 +378,36 @@ app.get('/api/game/state', (req, res) => {
   });
 });
 
-// Get round history
-app.get('/api/game/history', async (req, res) => {
-  try {
-    const historyRef = db.collection('gameHistory')
-      .orderBy('roundId', 'desc')
-      .limit(20);
-    
-    const snapshot = await historyRef.get();
-    const history = [];
-    
-    snapshot.forEach(doc => {
-      history.push(doc.data());
-    });
-    
-    res.json(history);
-  } catch (error) {
-    console.error('History error:', error);
-    res.status(500).json({ error: 'Failed to get history' });
-  }
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Firebase initialized: ${firebaseInitialized}`);
+  console.log(`Node version: ${process.version}`);
+  
+  // Only start game loop
+  startGameLoop();
 });
 
-// Game loop (runs on server)
-async function runGameLoop() {
+// Game loop
+async function startGameLoop() {
   console.log('Game loop started');
   
   while (true) {
     try {
-      // Waiting phase
       gameState.status = 'WAITING';
       gameState.currentMultiplier = 1.00;
       gameState.startTime = null;
-      console.log(`Round ${gameState.roundId} - Waiting for bets`);
+      console.log(`Round ${gameState.roundId} - Waiting`);
       
-      // Wait 5 seconds for bets
       await new Promise(resolve => setTimeout(resolve, 5000));
       
-      // Generate crash point
       const clientSeed = gameState.roundId.toString();
       gameState.crashPoint = await generateCrashPoint(currentServerSeed, clientSeed);
       gameState.status = 'IN_GAME';
       gameState.startTime = Date.now();
-      console.log(`Round ${gameState.roundId} - Started. Crash point: ${gameState.crashPoint}x`);
+      console.log(`Round ${gameState.roundId} - Flying. Crash: ${gameState.crashPoint}x`);
       
-      // Game running phase
       const startTime = Date.now();
       while (true) {
         const elapsed = (Date.now() - startTime) / 1000;
@@ -414,30 +420,15 @@ async function runGameLoop() {
           break;
         }
         
-        // Check auto cashouts
-        await processAutoCashouts();
-        
-        await new Promise(resolve => setTimeout(resolve, 50)); // 20 updates per second
+        await new Promise(resolve => setTimeout(resolve, 50));
       }
-      
-      // Record round in history
-      await db.collection('gameHistory').add({
-        roundId: gameState.roundId,
-        crashPoint: gameState.crashPoint,
-        serverSeed: currentServerSeed,
-        finishedAt: new Date().toISOString()
-      });
       
       // Rotate seeds
       currentServerSeed = nextServerSeed;
       nextServerSeed = crypto.randomBytes(16).toString('hex');
       
-      // Process all remaining bets as losses
-      await processRemainingBets();
-      
       gameState.roundId++;
       
-      // Short delay between rounds
       await new Promise(resolve => setTimeout(resolve, 3000));
       
     } catch (error) {
@@ -446,64 +437,3 @@ async function runGameLoop() {
     }
   }
 }
-
-async function processAutoCashouts() {
-  try {
-    const betsRef = db.collection('bets')
-      .where('roundId', '==', gameState.roundId)
-      .where('status', '==', 'active');
-    
-    const snapshot = await betsRef.get();
-    
-    for (const doc of snapshot.docs) {
-      const betData = doc.data();
-      if (betData.autoCashout && betData.autoCashout <= gameState.currentMultiplier) {
-        const winnings = betData.amount * betData.autoCashout;
-        
-        await doc.ref.update({
-          status: 'cashed_out',
-          cashoutMultiplier: betData.autoCashout,
-          winnings,
-          cashedOutAt: new Date().toISOString()
-        });
-        
-        const userRef = db.collection('users').doc(betData.userId);
-        await userRef.update({
-          balance: FieldValue.increment(winnings)
-        });
-      }
-    }
-  } catch (error) {
-    console.error('Auto cashout error:', error);
-  }
-}
-
-async function processRemainingBets() {
-  try {
-    const betsRef = db.collection('bets')
-      .where('roundId', '==', gameState.roundId)
-      .where('status', '==', 'active');
-    
-    const snapshot = await betsRef.get();
-    
-    for (const doc of snapshot.docs) {
-      await doc.ref.update({
-        status: 'lost',
-        cashoutMultiplier: null,
-        winnings: 0
-      });
-    }
-  } catch (error) {
-    console.error('Process remaining bets error:', error);
-  }
-}
-
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Node version: ${process.version}`);
-  runGameLoop().catch(error => {
-    console.error('Fatal game loop error:', error);
-  });
-});
