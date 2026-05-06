@@ -4,9 +4,10 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import { initializeApp, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -15,7 +16,7 @@ const firebaseConfig = {
   type: "service_account",
   project_id: process.env.FIREBASE_PROJECT_ID,
   private_key_id: process.env.FIREBASE_PRIVATE_KEY_ID,
-  private_key: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  private_key: process.env.FIREBASE_PRIVATE_KEY ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') : '',
   client_email: process.env.FIREBASE_CLIENT_EMAIL,
   client_id: process.env.FIREBASE_CLIENT_ID,
   auth_uri: "https://accounts.google.com/o/oauth2/auth",
@@ -24,9 +25,16 @@ const firebaseConfig = {
   client_x509_cert_url: process.env.FIREBASE_CLIENT_CERT_URL
 };
 
-initializeApp({
-  credential: cert(firebaseConfig)
-});
+// Check if Firebase credentials exist before initializing
+try {
+  initializeApp({
+    credential: cert(firebaseConfig)
+  });
+  console.log('Firebase initialized successfully');
+} catch (error) {
+  console.error('Firebase initialization error:', error.message);
+  console.log('Server will start but Firebase features may not work');
+}
 
 const db = getFirestore();
 const app = express();
@@ -34,8 +42,8 @@ const app = express();
 // Security middleware
 app.use(helmet());
 app.use(cors({
-  origin: ['https://your-frontend-domain.com', 'http://localhost:3000'],
-  methods: ['GET', 'POST'],
+  origin: ['https://aviator-server-puy9.onrender.com', 'http://localhost:3000', 'http://localhost:5000'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
   credentials: true
 }));
 app.use(express.json());
@@ -63,6 +71,10 @@ const authenticateToken = (req, res, next) => {
     return res.status(401).json({ error: 'Access denied. No token provided.' });
   }
   
+  if (!process.env.JWT_SECRET) {
+    return res.status(500).json({ error: 'JWT secret not configured on server' });
+  }
+  
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
       return res.status(403).json({ error: 'Invalid or expired token' });
@@ -82,9 +94,7 @@ let gameState = {
 };
 
 // Generate crash point using provably fair algorithm
-function generateCrashPoint(serverSeed, clientSeed) {
-  // Provably fair algorithm
-  const crypto = await import('crypto');
+async function generateCrashPoint(serverSeed, clientSeed) {
   const hash = crypto.createHmac('sha256', serverSeed)
     .update(clientSeed)
     .digest('hex');
@@ -94,7 +104,7 @@ function generateCrashPoint(serverSeed, clientSeed) {
   
   // House edge of 1%
   const result = (0.99 * e) / (h + 1);
-  return Math.max(1, result.toFixed(2));
+  return Math.max(1, parseFloat(result.toFixed(2)));
 }
 
 // Server seed management
@@ -105,7 +115,11 @@ let nextServerSeed = crypto.randomBytes(16).toString('hex');
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: Date.now() });
+  res.json({ 
+    status: 'ok', 
+    timestamp: Date.now(),
+    uptime: process.uptime()
+  });
 });
 
 // Register user
@@ -140,7 +154,7 @@ app.post('/api/auth/register', async (req, res) => {
     
     const token = jwt.sign(
       { username, userId: username },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'fallback-secret',
       { expiresIn: '24h' }
     );
     
@@ -182,7 +196,7 @@ app.post('/api/auth/login', async (req, res) => {
     
     const token = jwt.sign(
       { username, userId: username },
-      process.env.JWT_SECRET,
+      process.env.JWT_SECRET || 'fallback-secret',
       { expiresIn: '24h' }
     );
     
@@ -315,7 +329,7 @@ app.post('/api/game/cashout', authenticateToken, async (req, res) => {
     // Add winnings to user balance
     const userRef = db.collection('users').doc(req.user.username);
     await userRef.update({
-      balance: firebase.firestore.FieldValue.increment(winnings)
+      balance: FieldValue.increment(winnings)
     });
     
     // Get new balance
@@ -340,7 +354,7 @@ app.get('/api/game/state', (req, res) => {
     crashPoint: gameState.status === 'CRASHED' ? gameState.crashPoint : null,
     roundId: gameState.roundId,
     multiplier: gameState.status === 'IN_GAME' ? gameState.currentMultiplier : 1.00,
-    nextServerSeedHash: require('crypto').createHash('sha256').update(nextServerSeed).digest('hex')
+    nextServerSeedHash: crypto.createHash('sha256').update(nextServerSeed).digest('hex')
   });
 });
 
@@ -360,112 +374,136 @@ app.get('/api/game/history', async (req, res) => {
     
     res.json(history);
   } catch (error) {
+    console.error('History error:', error);
     res.status(500).json({ error: 'Failed to get history' });
   }
 });
 
 // Game loop (runs on server)
 async function runGameLoop() {
+  console.log('Game loop started');
+  
   while (true) {
-    // Waiting phase
-    gameState.status = 'WAITING';
-    gameState.currentMultiplier = 1.00;
-    gameState.startTime = null;
-    
-    // Wait 5 seconds for bets
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    
-    // Generate crash point
-    const clientSeed = gameState.roundId.toString();
-    gameState.crashPoint = await generateCrashPoint(currentServerSeed, clientSeed);
-    gameState.status = 'IN_GAME';
-    gameState.startTime = Date.now();
-    
-    // Game running phase
-    const startTime = Date.now();
-    while (true) {
-      const elapsed = (Date.now() - startTime) / 1000;
-      gameState.currentMultiplier = Math.pow(Math.E, 0.07 * elapsed);
+    try {
+      // Waiting phase
+      gameState.status = 'WAITING';
+      gameState.currentMultiplier = 1.00;
+      gameState.startTime = null;
+      console.log(`Round ${gameState.roundId} - Waiting for bets`);
       
-      if (gameState.currentMultiplier >= gameState.crashPoint) {
-        gameState.currentMultiplier = gameState.crashPoint;
-        gameState.status = 'CRASHED';
-        break;
+      // Wait 5 seconds for bets
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      
+      // Generate crash point
+      const clientSeed = gameState.roundId.toString();
+      gameState.crashPoint = await generateCrashPoint(currentServerSeed, clientSeed);
+      gameState.status = 'IN_GAME';
+      gameState.startTime = Date.now();
+      console.log(`Round ${gameState.roundId} - Started. Crash point: ${gameState.crashPoint}x`);
+      
+      // Game running phase
+      const startTime = Date.now();
+      while (true) {
+        const elapsed = (Date.now() - startTime) / 1000;
+        gameState.currentMultiplier = Math.pow(Math.E, 0.07 * elapsed);
+        
+        if (gameState.currentMultiplier >= gameState.crashPoint) {
+          gameState.currentMultiplier = gameState.crashPoint;
+          gameState.status = 'CRASHED';
+          console.log(`Round ${gameState.roundId} - Crashed at ${gameState.crashPoint}x`);
+          break;
+        }
+        
+        // Check auto cashouts
+        await processAutoCashouts();
+        
+        await new Promise(resolve => setTimeout(resolve, 50)); // 20 updates per second
       }
       
-      // Check auto cashouts
-      await processAutoCashouts();
+      // Record round in history
+      await db.collection('gameHistory').add({
+        roundId: gameState.roundId,
+        crashPoint: gameState.crashPoint,
+        serverSeed: currentServerSeed,
+        finishedAt: new Date().toISOString()
+      });
       
-      await new Promise(resolve => setTimeout(resolve, 50)); // 20 updates per second
+      // Rotate seeds
+      currentServerSeed = nextServerSeed;
+      nextServerSeed = crypto.randomBytes(16).toString('hex');
+      
+      // Process all remaining bets as losses
+      await processRemainingBets();
+      
+      gameState.roundId++;
+      
+      // Short delay between rounds
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+    } catch (error) {
+      console.error('Game loop error:', error);
+      await new Promise(resolve => setTimeout(resolve, 5000));
     }
-    
-    // Record round in history
-    await db.collection('gameHistory').add({
-      roundId: gameState.roundId,
-      crashPoint: gameState.crashPoint,
-      serverSeed: currentServerSeed,
-      finishedAt: new Date().toISOString()
-    });
-    
-    // Rotate seeds
-    currentServerSeed = nextServerSeed;
-    nextServerSeed = require('crypto').randomBytes(16).toString('hex');
-    
-    // Process all remaining bets as losses
-    await processRemainingBets();
-    
-    gameState.roundId++;
-    
-    // Short delay between rounds
-    await new Promise(resolve => setTimeout(resolve, 3000));
   }
 }
 
 async function processAutoCashouts() {
-  const betsRef = db.collection('bets')
-    .where('roundId', '==', gameState.roundId)
-    .where('status', '==', 'active')
-    .where('autoCashout', '<=', gameState.currentMultiplier);
-  
-  const snapshot = await betsRef.get();
-  
-  snapshot.forEach(async (doc) => {
-    const betData = doc.data();
-    const winnings = betData.amount * betData.autoCashout;
+  try {
+    const betsRef = db.collection('bets')
+      .where('roundId', '==', gameState.roundId)
+      .where('status', '==', 'active');
     
-    await doc.ref.update({
-      status: 'cashed_out',
-      cashoutMultiplier: betData.autoCashout,
-      winnings,
-      cashedOutAt: new Date().toISOString()
-    });
+    const snapshot = await betsRef.get();
     
-    const userRef = db.collection('users').doc(betData.userId);
-    await userRef.update({
-      balance: firebase.firestore.FieldValue.increment(winnings)
-    });
-  });
+    for (const doc of snapshot.docs) {
+      const betData = doc.data();
+      if (betData.autoCashout && betData.autoCashout <= gameState.currentMultiplier) {
+        const winnings = betData.amount * betData.autoCashout;
+        
+        await doc.ref.update({
+          status: 'cashed_out',
+          cashoutMultiplier: betData.autoCashout,
+          winnings,
+          cashedOutAt: new Date().toISOString()
+        });
+        
+        const userRef = db.collection('users').doc(betData.userId);
+        await userRef.update({
+          balance: FieldValue.increment(winnings)
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Auto cashout error:', error);
+  }
 }
 
 async function processRemainingBets() {
-  const betsRef = db.collection('bets')
-    .where('roundId', '==', gameState.roundId)
-    .where('status', '==', 'active');
-  
-  const snapshot = await betsRef.get();
-  
-  snapshot.forEach(async (doc) => {
-    await doc.ref.update({
-      status: 'lost',
-      cashoutMultiplier: null,
-      winnings: 0
-    });
-  });
+  try {
+    const betsRef = db.collection('bets')
+      .where('roundId', '==', gameState.roundId)
+      .where('status', '==', 'active');
+    
+    const snapshot = await betsRef.get();
+    
+    for (const doc of snapshot.docs) {
+      await doc.ref.update({
+        status: 'lost',
+        cashoutMultiplier: null,
+        winnings: 0
+      });
+    }
+  } catch (error) {
+    console.error('Process remaining bets error:', error);
+  }
 }
 
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  runGameLoop();
+  console.log(`Node version: ${process.version}`);
+  runGameLoop().catch(error => {
+    console.error('Fatal game loop error:', error);
+  });
 });
