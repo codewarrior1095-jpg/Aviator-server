@@ -1,306 +1,270 @@
-import express from 'express';
-import cors from 'cors';
-import crypto from 'crypto';
-import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
+import express from "express";
+import cors from "cors";
+import crypto from "crypto";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 
 const app = express();
 
-// ==========================================
-// 🛡️ LAYER 1: Express Security Middleware
-// ==========================================
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false
-}));
+/* =========================
+   SECURITY MIDDLEWARE
+========================= */
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+  })
+);
 
-// Strict CORS - only allow your frontend domains
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:5000',
-    'https://your-frontend-domain.com', // Replace with your actual domain
-    'http://127.0.0.1:5500',
-    'http://127.0.0.1:5501'
-  ],
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  maxAge: 600
-}));
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "http://localhost:5000",
+      "http://127.0.0.1:5500",
+      "http://127.0.0.1:5501",
+    ],
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-app.use(express.json({ limit: '10kb' })); // Prevent payload attacks
+app.use(express.json({ limit: "10kb" }));
 
-// ==========================================
-// 🛡️ LAYER 2: SERVER-SIDE RATE LIMITING
-// Hacker CANNOT bypass this
-// ==========================================
+/* =========================
+   RATE LIMITING
+========================= */
 
-// Global rate limit: 100 requests per 15 minutes per IP
 const globalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: 'Too many requests, slow down' },
-  keyGenerator: (req) => {
-    return req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  }
 });
 
-// Strict rate limit on game state: 30 requests per second per IP
 const gameStateLimiter = rateLimit({
   windowMs: 1000,
   max: 30,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Polling too fast' },
-  keyGenerator: (req) => {
-    return req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  }
 });
 
-// Verification endpoint: 5 requests per minute per IP
 const verifyLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { error: 'Too many verification attempts' },
-  keyGenerator: (req) => {
-    return req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  }
 });
 
-// Apply rate limiters
-app.use('/api/', globalLimiter);
-app.use('/api/game/state', gameStateLimiter);
-app.use('/api/game/verify', verifyLimiter);
+app.use("/api/", globalLimiter);
+app.use("/api/game/state", gameStateLimiter);
+app.use("/api/game/verify", verifyLimiter);
 
-// ==========================================
-// 🛡️ LAYER 3: IP BLACKLIST (in-memory)
-// ==========================================
-const suspiciousIPs = new Map();
-const BLOCK_THRESHOLD = 50; // Block after 50 rapid requests
-const BLOCK_DURATION = 5 * 60 * 1000; // 5 minute block
+/* =========================
+   SIMPLE IP GUARD (FIXED)
+========================= */
+
+const ipMap = new Map();
+
+function getIP(req) {
+  return (
+    req.headers["x-forwarded-for"]?.split(",")[0] ||
+    req.socket.remoteAddress ||
+    "unknown"
+  );
+}
 
 app.use((req, res, next) => {
-  const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
-  
-  // Check if IP is blocked
-  if (suspiciousIPs.has(ip)) {
-    const blockData = suspiciousIPs.get(ip);
-    if (Date.now() - blockData.blockedAt < BLOCK_DURATION) {
-      return res.status(403).json({ error: 'Access denied. Suspicious activity detected.' });
-    } else {
-      suspiciousIPs.delete(ip); // Unblock after duration
-    }
+  const ip = getIP(req);
+  const now = Date.now();
+
+  if (!ipMap.has(ip)) {
+    ipMap.set(ip, { count: 1, start: now, blockedUntil: 0 });
+    return next();
   }
-  
-  // Track request frequency
-  if (!suspiciousIPs.has(ip)) {
-    suspiciousIPs.set(ip, { count: 0, firstRequest: Date.now(), blockedAt: 0 });
+
+  const data = ipMap.get(ip);
+
+  if (data.blockedUntil > now) {
+    return res.status(403).json({ error: "Blocked temporarily" });
   }
-  
-  const data = suspiciousIPs.get(ip);
+
   data.count++;
-  
-  // Block if too many requests in short time
-  if (data.count > BLOCK_THRESHOLD && Date.now() - data.firstRequest < 10000) {
-    data.blockedAt = Date.now();
-    console.log(`🛡️ BLOCKED IP: ${ip} (${data.count} requests in ${Math.round((Date.now()-data.firstRequest)/1000)}s)`);
-    return res.status(403).json({ error: 'Access denied. Suspicious activity detected.' });
+
+  // reset window every 10s
+  if (now - data.start > 10000) {
+    data.count = 1;
+    data.start = now;
   }
-  
-  // Reset counter every 10 seconds
-  if (Date.now() - data.firstRequest > 10000) {
-    data.count = 0;
-    data.firstRequest = Date.now();
+
+  if (data.count > 80) {
+    data.blockedUntil = now + 5 * 60 * 1000;
+    console.log(`BLOCKED IP: ${ip}`);
+    return res.status(403).json({ error: "Too many requests" });
   }
-  
+
   next();
 });
 
-// ==========================================
-// 🔒 GAME STATE - Crash point NEVER broadcast
-// ==========================================
+/* =========================
+   GAME STATE
+========================= */
+
 let gameState = {
-  status: 'WAITING',
-  multiplier: 1.00,
+  status: "WAITING",
+  multiplier: 1,
   roundId: 1,
-  startTime: null,
-  
-  // SECRET - Never in API response during IN_GAME
-  crashPoint: 1.00,
-  serverSeed: null,
-  
-  // PUBLIC
-  crashPointHash: null,
-  clientSeed: null,
+  crashPoint: 1,
+  serverSeed: "",
+  clientSeed: "",
+  crashPointHash: "",
 };
 
-// ==========================================
-// CRASH POINT GENERATOR
-// ==========================================
+/* =========================
+   CRYPTO LOGIC
+========================= */
+
 function calculateCrashPoint(serverSeed, clientSeed) {
-  const hash = crypto.createHmac('sha256', serverSeed)
+  const hash = crypto
+    .createHmac("sha256", serverSeed)
     .update(clientSeed)
-    .digest('hex');
-  
-  const h = parseInt(hash.slice(0, 13), 16);
+    .digest("hex");
+
+  const num = parseInt(hash.slice(0, 13), 16);
   const e = Math.pow(2, 52);
-  const result = (0.99 * e) / (h + 1);
-  
-  return parseFloat(Math.max(1.00, Math.min(28.00, result)).toFixed(2));
+
+  const result = (0.99 * e) / (num + 1);
+
+  return Math.min(28, Math.max(1, parseFloat(result.toFixed(2))));
 }
 
-function createCrashPointHash(serverSeed, crashPoint) {
-  return crypto.createHash('sha256')
-    .update(`${serverSeed}:${crashPoint}`)
-    .digest('hex');
+function createSeed() {
+  return crypto.randomBytes(32).toString("hex");
 }
 
-function getNigeriaClientSeed() {
-  const now = new Date();
-  const nigeriaTime = new Date(now.getTime() + (1 * 60 * 60 * 1000));
-  return nigeriaTime.toISOString().replace('T', ' ').slice(0, 19) + ' WAT';
+function createHash(seed, crash) {
+  return crypto.createHash("sha256").update(`${seed}:${crash}`).digest("hex");
 }
 
-function generateServerSeed() {
-  return crypto.randomBytes(32).toString('hex');
+function getClientSeed() {
+  return `CLIENT-${Date.now()}`;
 }
 
-// ==========================================
-// 🔒 HARDENED API - crashPoint NEVER sent
-// ==========================================
-app.get('/api/game/state', (req, res) => {
-  
-  // Build response based on game state
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/* =========================
+   API ENDPOINTS
+========================= */
+
+app.get("/api/game/state", (req, res) => {
   const response = {
     status: gameState.status,
     multiplier: gameState.multiplier,
     roundId: gameState.roundId,
     crashPointHash: gameState.crashPointHash,
-    clientSeed: gameState.clientSeed,
   };
-  
-  // 🔒 CRITICAL: Only reveal crash data AFTER round ends
-  if (gameState.status === 'CRASHED') {
-    response.serverSeed = gameState.serverSeed;
+
+  if (gameState.status === "CRASHED") {
     response.crashPoint = gameState.crashPoint;
+    response.serverSeed = gameState.serverSeed;
   }
-  // During WAITING and IN_GAME: crashPoint IS ABSENT from response
-  
-  // 🛡️ Security headers
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-  
+
+  res.setHeader("Cache-Control", "no-store");
   res.json(response);
 });
 
-// ==========================================
-// ✅ VERIFICATION ENDPOINT (past rounds)
-// ==========================================
-app.get('/api/game/verify/:roundId', (req, res) => {
-  const { roundId } = req.params;
+app.get("/api/game/verify/:roundId", (req, res) => {
   const { serverSeed, clientSeed, crashPoint } = req.query;
-  
+
   if (!serverSeed || !clientSeed || !crashPoint) {
-    return res.status(400).json({ error: 'Missing parameters' });
+    return res.status(400).json({ error: "Missing data" });
   }
-  
-  // Validate inputs
-  if (serverSeed.length !== 64 || !/^[a-f0-9]+$/.test(serverSeed)) {
-    return res.status(400).json({ error: 'Invalid server seed format' });
-  }
-  
-  const parsedCrashPoint = parseFloat(crashPoint);
-  if (isNaN(parsedCrashPoint) || parsedCrashPoint < 1 || parsedCrashPoint > 28) {
-    return res.status(400).json({ error: 'Invalid crash point value' });
-  }
-  
+
   const calculated = calculateCrashPoint(serverSeed, clientSeed);
-  
+
   res.json({
-    roundId: parseInt(roundId),
-    provided: { serverSeed, clientSeed, crashPoint: parsedCrashPoint },
-    calculated: { crashPoint: calculated },
-    verified: Math.abs(calculated - parsedCrashPoint) < 0.01 // Float tolerance
+    roundId: req.params.roundId,
+    calculated,
+    provided: parseFloat(crashPoint),
+    verified: Math.abs(calculated - crashPoint) < 0.01,
   });
 });
 
-// ==========================================
-// 🛡️ HEALTH CHECK (no sensitive data)
-// ==========================================
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'ok',
-    timestamp: Date.now(),
-    uptime: process.uptime()
+app.get("/api/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptime: process.uptime(),
+    time: Date.now(),
   });
 });
 
-// ==========================================
-// GAME LOOP
-// ==========================================
+/* =========================
+   GAME ENGINE (FIXED LOOP)
+========================= */
+
 async function runGameLoop() {
-  console.log('🛡️ HARDENED SERVER STARTED');
-  console.log('🔒 Rate limiting: SERVER-SIDE (30 req/sec per IP)');
-  console.log('🔒 Crash point: NEVER broadcast during gameplay');
-  console.log('🔒 IP blocking: Automatic for suspicious activity');
-  
-  while (true) {
-    // WAITING PHASE
-    gameState.status = 'WAITING';
-    gameState.multiplier = 1.00;
-    gameState.startTime = null;
-    
-    gameState.serverSeed = generateServerSeed();
-    gameState.clientSeed = getNigeriaClientSeed();
-    gameState.crashPoint = calculateCrashPoint(gameState.serverSeed, gameState.clientSeed);
-    gameState.crashPointHash = createCrashPointHash(gameState.serverSeed, gameState.crashPoint);
-    
-    console.log(`\n🟢 Round ${gameState.roundId} - Waiting`);
-    console.log(`   Hash: ${gameState.crashPointHash.slice(0, 16)}...`);
-    
-    await sleep(5000);
-    
-    // IN_GAME PHASE
-    gameState.status = 'IN_GAME';
-    gameState.startTime = Date.now();
-    console.log(`✈️ Round ${gameState.roundId} - Flying`);
-    
-    const startTime = Date.now();
+  console.log("GAME ENGINE STARTED");
+
+  try {
     while (true) {
-      const elapsed = (Date.now() - startTime) / 1000;
-      gameState.multiplier = parseFloat(Math.pow(Math.E, 0.085 * elapsed).toFixed(2));
-      
-      if (gameState.multiplier >= gameState.crashPoint) {
-        gameState.multiplier = gameState.crashPoint;
-        break;
+      /* WAITING */
+      gameState.status = "WAITING";
+      gameState.multiplier = 1;
+
+      gameState.serverSeed = createSeed();
+      gameState.clientSeed = getClientSeed();
+
+      gameState.crashPoint = calculateCrashPoint(
+        gameState.serverSeed,
+        gameState.clientSeed
+      );
+
+      gameState.crashPointHash = createHash(
+        gameState.serverSeed,
+        gameState.crashPoint
+      );
+
+      await sleep(4000);
+
+      /* IN GAME */
+      gameState.status = "IN_GAME";
+      const start = Date.now();
+
+      while (true) {
+        const t = (Date.now() - start) / 1000;
+
+        gameState.multiplier = parseFloat(
+          Math.exp(0.085 * t).toFixed(2)
+        );
+
+        if (gameState.multiplier >= gameState.crashPoint) {
+          gameState.multiplier = gameState.crashPoint;
+          break;
+        }
+
+        await sleep(50);
       }
-      
-      await sleep(50);
+
+      /* CRASHED */
+      gameState.status = "CRASHED";
+
+      console.log(
+        `Round ${gameState.roundId} crashed at ${gameState.crashPoint}`
+      );
+
+      gameState.roundId++;
+
+      await sleep(3000);
     }
-    
-    // CRASHED
-    gameState.status = 'CRASHED';
-    console.log(`💥 Round ${gameState.roundId} - Crashed at ${gameState.crashPoint}x`);
-    
-    gameState.roundId++;
-    await sleep(3000);
+  } catch (err) {
+    console.error("GAME LOOP CRASH:", err);
+    setTimeout(runGameLoop, 2000); // auto-recover
   }
 }
 
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+/* =========================
+   START SERVER
+========================= */
 
-// ==========================================
-// START
-// ==========================================
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server on port ${PORT}`);
+  console.log(`SERVER RUNNING ON PORT ${PORT}`);
   runGameLoop();
 });
