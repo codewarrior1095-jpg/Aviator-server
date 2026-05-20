@@ -1,240 +1,313 @@
-import express from "express";
-import cors from "cors";
-import crypto from "crypto";
-import { Server } from "socket.io";
-import http from "http";
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Aviator – Works Perfectly</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <style>
+    body { background: #0a0b0c; font-family: 'Inter', sans-serif; }
+    canvas { display: block; width: 100%; height: auto; background: #060b13; border-radius: 1rem; }
+    .btn-cashout { background: #f97316 !important; }
+    .btn-bet { background: #28a909 !important; }
+  </style>
+</head>
+<body class="flex justify-center items-center min-h-screen p-4">
+  <div class="w-full max-w-md bg-[#0a0b0c] rounded-2xl shadow-2xl overflow-hidden">
+    <div class="bg-[#101112] px-4 py-3 flex justify-between items-center border-b border-gray-800">
+      <span class="text-orange-500 font-black text-2xl italic">AVIATOR</span>
+      <div class="flex items-center gap-2">
+        <span class="text-green-500 font-bold text-xl" id="balance">0.00</span>
+      </div>
+    </div>
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+    <div class="p-3 relative">
+      <div class="relative">
+        <canvas id="gameCanvas" class="w-full aspect-[4/2.5]"></canvas>
+        <div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div class="text-6xl sm:text-7xl font-black text-white drop-shadow-lg" id="multiplierDisplay">1.00x</div>
+        </div>
+        <div id="waitingOverlay" class="absolute inset-0 bg-black/80 flex items-center justify-center rounded-xl hidden">
+          <div class="text-center">
+            <div class="w-24 h-24 mx-auto mb-3 bg-amber-500 rounded-full flex items-center justify-center text-4xl">✈️</div>
+            <div class="text-white text-lg font-bold">Next round starting...</div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-app.use(cors());
-app.use(express.json());
+    <div class="p-3 bg-[#1b1c1d] mx-3 rounded-xl">
+      <div class="flex gap-2">
+        <div class="flex-1 bg-black rounded-full flex items-center justify-between px-3 py-2">
+          <button id="minusBtn" class="w-8 h-8 rounded-full bg-gray-800 text-white font-bold">-</button>
+          <span id="betAmount" class="text-white font-bold text-xl">10.00</span>
+          <button id="plusBtn" class="w-8 h-8 rounded-full bg-gray-800 text-white font-bold">+</button>
+        </div>
+        <button id="actionBtn" class="flex-1 btn-bet text-white font-bold py-3 rounded-full text-xl transition">Bet</button>
+      </div>
+      <div class="grid grid-cols-4 gap-2 mt-3">
+        <button class="quickBet bg-gray-800 py-2 rounded-full text-sm" data-amount="10">10</button>
+        <button class="quickBet bg-gray-800 py-2 rounded-full text-sm" data-amount="25">25</button>
+        <button class="quickBet bg-gray-800 py-2 rounded-full text-sm" data-amount="50">50</button>
+        <button class="quickBet bg-gray-800 py-2 rounded-full text-sm" data-amount="100">100</button>
+      </div>
+    </div>
 
-// ------------------------------
-// Simple in‑memory user store
-// ------------------------------
-const users = new Map(); // userId -> { id, username, balance }
-let nextUserId = 1;
+    <div class="p-3 mt-2">
+      <div class="text-gray-400 text-xs mb-1">LAST CRASHES</div>
+      <div id="historyBar" class="flex gap-2 overflow-x-auto pb-2"></div>
+    </div>
+    <div class="p-3 border-t border-gray-800 mt-2 text-center text-gray-500 text-xs">
+      <span>⚡ Real‑time WebSocket | Plane moves with multiplier</span>
+    </div>
+  </div>
 
-// Helper: create a user with starting balance
-function createUser(username) {
-  const id = (nextUserId++).toString();
-  const user = { id, username, balance: 5000 };
-  users.set(id, user);
-  return user;
-}
+  <script>
+    // ---------- CONFIGURATION ----------
+    // *** CHANGE THIS TO YOUR VPS IP OR DOMAIN ***
+    const BACKEND_URL = 'https://aviator-server-puy9.onrender.com';   // <-- your Render URL
+    const API_URL = BACKEND_URL + '/api';
+    const WS_URL = BACKEND_URL;
 
-// Pre‑create a demo user so we don't need login for testing
-const demoUser = createUser("player1");
-console.log(`Demo user: id=${demoUser.id}, balance=${demoUser.balance}`);
+    let currentBetId = null;
+    let activeBet = { amount: 0, cashedOut: false };
+    let currentBetAmount = 10;
+    let balance = 0;
 
-// ------------------------------
-// Game state
-// ------------------------------
-let gameState = {
-  status: "WAITING", // WAITING, IN_GAME, CRASHED
-  multiplier: 1.0,
-  roundId: 1,
-  crashPoint: 1.0,
-  serverSeed: "",
-  clientSeed: "",
-};
+    let gameState = { status: 'WAITING', multiplier: 1, progress: 0 };
+    let planeProgress = 0;
+    let currentMultiplier = 1;
 
-// ------------------------------
-// Provably fair crash point
-// ------------------------------
-function getCrashPointFromHash(hash) {
-  const num = parseInt(hash.slice(0, 13), 16);
-  const e = Math.pow(2, 52);
-  const result = (0.99 * e) / (num + 1);
-  return Math.min(28, Math.max(1, parseFloat(result.toFixed(2))));
-}
+    // Canvas
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    let planeImg = new Image();
+    planeImg.src = 'https://cdn-icons-png.flaticon.com/512/194/194632.png';
+    let planeLoaded = false;
+    planeImg.onload = () => planeLoaded = true;
 
-function generateCrashPoint() {
-  const serverSeed = crypto.randomBytes(32).toString("hex");
-  const clientSeed = `client-${Date.now()}`;
-  const hash = crypto.createHmac("sha256", serverSeed).update(clientSeed).digest("hex");
-  const crashPoint = getCrashPointFromHash(hash);
-  return { serverSeed, clientSeed, crashPoint, hash };
-}
+    function resizeCanvas() {
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * devicePixelRatio;
+      canvas.height = rect.height * devicePixelRatio;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
 
-// ------------------------------
-// Bets storage (in‑memory)
-// ------------------------------
-let activeBets = []; // for current round: { userId, betId, amount }
-let allBets = [];    // history
-let roundHistory = [];
-
-// ------------------------------
-// API Endpoints (REST)
-// ------------------------------
-
-// Get user balance
-app.get("/api/user/balance", (req, res) => {
-  // For demo, always return demo user balance
-  res.json({ balance: demoUser.balance });
-});
-
-// Place a bet
-app.post("/api/game/bet", (req, res) => {
-  const { amount } = req.body;
-  if (gameState.status !== "WAITING") {
-    return res.status(400).json({ error: "Can only bet before round starts" });
-  }
-  if (amount <= 0 || amount > demoUser.balance) {
-    return res.status(400).json({ error: "Invalid amount or insufficient balance" });
-  }
-  demoUser.balance -= amount;
-  const betId = crypto.randomBytes(8).toString("hex");
-  activeBets.push({
-    betId,
-    userId: demoUser.id,
-    username: demoUser.username,
-    amount,
-    cashedOut: false,
-    cashedOutAt: null,
-    winAmount: null,
-  });
-  res.json({ betId, newBalance: demoUser.balance });
-});
-
-// Cash out
-app.post("/api/game/cashout", (req, res) => {
-  const { betId } = req.body;
-  const bet = activeBets.find(b => b.betId === betId);
-  if (!bet) return res.status(404).json({ error: "Bet not found" });
-  if (bet.cashedOut) return res.status(400).json({ error: "Already cashed out" });
-  if (gameState.status !== "IN_GAME") {
-    return res.status(400).json({ error: "Cannot cash out now" });
-  }
-  const winAmount = bet.amount * gameState.multiplier;
-  bet.cashedOut = true;
-  bet.cashedOutAt = Date.now();
-  bet.winAmount = winAmount;
-  demoUser.balance += winAmount;
-  res.json({ winAmount, newBalance: demoUser.balance });
-});
-
-// Game history
-app.get("/api/game/history", (req, res) => {
-  res.json(roundHistory.slice(-20));
-});
-
-// Health check
-app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", round: gameState.roundId });
-});
-
-// ------------------------------
-// Game Loop with WebSocket emits
-// ------------------------------
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-async function runGame() {
-  console.log("🎮 Game engine started (WebSocket mode)");
-  while (true) {
-    // ----- WAITING (4 sec) -----
-    gameState.status = "WAITING";
-    gameState.multiplier = 1.0;
-    // Generate new crash point for this round
-    const { serverSeed, clientSeed, crashPoint, hash } = generateCrashPoint();
-    gameState.crashPoint = crashPoint;
-    gameState.serverSeed = serverSeed;
-    gameState.clientSeed = clientSeed;
-    gameState.crashPointHash = hash;
-    console.log(`Round ${gameState.roundId} crash point = ${crashPoint}x`);
-
-    io.emit("gameState", {
-      status: "WAITING",
-      roundId: gameState.roundId,
-      crashPointHash: hash,
-      progress: 0,
-    });
-    await sleep(4000);
-
-    // ----- IN_GAME (multiplier increases) -----
-    gameState.status = "IN_GAME";
-    const start = Date.now();
-    activeBets = []; // clear previous round's active bets
-    let lastProgress = -1;
-    let lastMultiplier = -1;
-
-    while (true) {
-      const elapsed = (Date.now() - start) / 1000;
-      let multiplier = parseFloat(Math.exp(0.085 * elapsed).toFixed(2));
-      if (multiplier >= gameState.crashPoint) {
-        multiplier = gameState.crashPoint;
-        gameState.multiplier = multiplier;
-        const progress = 1.0; // fully crashed
-        io.emit("multiplierUpdate", { multiplier, progress, roundId: gameState.roundId });
-        break;
-      }
-      gameState.multiplier = multiplier;
-      // progress = (multiplier - 1) / (crashPoint - 1) , but capped
-      let progress = (multiplier - 1) / (gameState.crashPoint - 1);
-      progress = Math.min(1, Math.max(0, progress));
-      if (progress !== lastProgress || multiplier !== lastMultiplier) {
-        io.emit("multiplierUpdate", { multiplier, progress, roundId: gameState.roundId });
-        lastProgress = progress;
-        lastMultiplier = multiplier;
-      }
-      await sleep(50);
+    // ---------- REST API calls ----------
+    async function apiCall(endpoint, method = 'GET', body = null) {
+      const options = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) options.body = JSON.stringify(body);
+      const res = await fetch(API_URL + endpoint, options);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'API error');
+      return data;
     }
 
-    // ----- CRASHED -----
-    gameState.status = "CRASHED";
-    console.log(`💥 Round ${gameState.roundId} crashed at ${gameState.crashPoint}x`);
-    // For any uncashed bet, they lose (no refund)
-    for (let bet of activeBets) {
-      if (!bet.cashedOut) {
-        bet.winAmount = 0;
-        allBets.push(bet);
+    async function fetchBalance() {
+      try {
+        const data = await apiCall('/user/balance');
+        balance = data.balance;
+        document.getElementById('balance').innerText = balance.toFixed(2);
+      } catch(e) { console.warn(e); }
+    }
+
+    async function placeBet(amount) {
+      if (gameState.status !== 'WAITING') {
+        alert('Can only bet before round starts');
+        return false;
+      }
+      try {
+        const data = await apiCall('/game/bet', 'POST', { amount });
+        currentBetId = data.betId;
+        activeBet = { amount, cashedOut: false };
+        balance = data.newBalance;
+        document.getElementById('balance').innerText = balance.toFixed(2);
+        updateActionButton();
+        return true;
+      } catch(e) {
+        alert(e.message);
+        return false;
+      }
+    }
+
+    async function cashOut() {
+      if (!currentBetId || activeBet.cashedOut) return;
+      try {
+        const data = await apiCall('/game/cashout', 'POST', { betId: currentBetId });
+        activeBet.cashedOut = true;
+        balance = data.newBalance;
+        document.getElementById('balance').innerText = balance.toFixed(2);
+        updateActionButton();
+      } catch(e) {
+        alert(e.message);
+      }
+    }
+
+    async function fetchHistory() {
+      try {
+        const data = await apiCall('/game/history');
+        const historyBar = document.getElementById('historyBar');
+        if (!data.length) {
+          historyBar.innerHTML = '<span class="text-gray-500 text-xs">No rounds yet</span>';
+          return;
+        }
+        historyBar.innerHTML = data.map(h => `<span class="bg-purple-900/30 px-3 py-1 rounded-full text-purple-400 text-xs">${h.crashPoint.toFixed(2)}x</span>`).join('');
+      } catch(e) {}
+    }
+
+    function updateActionButton() {
+      const btn = document.getElementById('actionBtn');
+      if (gameState.status === 'IN_GAME' && currentBetId && !activeBet.cashedOut) {
+        const winValue = (activeBet.amount * currentMultiplier).toFixed(2);
+        btn.innerHTML = `Cashout ${winValue}`;
+        btn.classList.remove('btn-bet');
+        btn.classList.add('btn-cashout');
       } else {
-        allBets.push(bet);
+        btn.innerHTML = `Bet ${currentBetAmount.toFixed(2)}`;
+        btn.classList.remove('btn-cashout');
+        btn.classList.add('btn-bet');
       }
     }
-    roundHistory.unshift({
-      roundId: gameState.roundId,
-      crashPoint: gameState.crashPoint,
-      timestamp: Date.now(),
-      serverSeed: gameState.serverSeed,
-      clientSeed: gameState.clientSeed,
-    });
-    io.emit("gameCrashed", {
-      crashPoint: gameState.crashPoint,
-      roundId: gameState.roundId,
-      progress: 1,
-      serverSeed: gameState.serverSeed,
-      clientSeed: gameState.clientSeed,
-    });
-    gameState.roundId++;
-    await sleep(3000);
-  }
-}
 
-// Socket.IO connection handler
-io.on("connection", (socket) => {
-  console.log("Client connected");
-  // Send current game state immediately
-  let progress = 0;
-  if (gameState.status === "IN_GAME") {
-    progress = (gameState.multiplier - 1) / (gameState.crashPoint - 1);
-    progress = Math.min(1, Math.max(0, progress));
-  } else if (gameState.status === "CRASHED") {
-    progress = 1;
-  }
-  socket.emit("gameState", {
-    status: gameState.status,
-    multiplier: gameState.multiplier,
-    roundId: gameState.roundId,
-    crashPointHash: gameState.crashPointHash,
-    progress,
-  });
-});
+    // ---------- WebSocket ----------
+    let socket = null;
+    function connectWebSocket() {
+      socket = io(WS_URL, { transports: ['websocket'] });
+      socket.on('connect', () => console.log('✅ WebSocket connected'));
+      socket.on('gameState', (data) => {
+        console.log('gameState', data);
+        gameState.status = data.status;
+        gameState.multiplier = data.multiplier;
+        gameState.progress = data.progress || 0;
+        planeProgress = gameState.progress;
+        currentMultiplier = data.multiplier;
+        document.getElementById('multiplierDisplay').innerText = data.multiplier.toFixed(2) + 'x';
+        const waitingOverlay = document.getElementById('waitingOverlay');
+        if (data.status === 'WAITING') {
+          waitingOverlay.classList.remove('hidden');
+        } else {
+          waitingOverlay.classList.add('hidden');
+        }
+        if (data.status === 'CRASHED') {
+          document.getElementById('multiplierDisplay').classList.add('text-red-500');
+        } else {
+          document.getElementById('multiplierDisplay').classList.remove('text-red-500');
+        }
+        updateActionButton();
+      });
+      socket.on('multiplierUpdate', (data) => {
+        currentMultiplier = data.multiplier;
+        planeProgress = data.progress;
+        document.getElementById('multiplierDisplay').innerHTML = data.multiplier.toFixed(2) + 'x';
+        updateActionButton();
+      });
+      socket.on('gameCrashed', (data) => {
+        gameState.status = 'CRASHED';
+        currentMultiplier = data.crashPoint;
+        planeProgress = 1;
+        document.getElementById('multiplierDisplay').innerHTML = data.crashPoint.toFixed(2) + 'x';
+        document.getElementById('multiplierDisplay').classList.add('text-red-500');
+        document.getElementById('waitingOverlay').classList.add('hidden');
+        if (currentBetId && !activeBet.cashedOut) {
+          currentBetId = null;
+          activeBet.cashedOut = true;
+        }
+        updateActionButton();
+        fetchHistory();
+      });
+      socket.on('disconnect', () => console.warn('WebSocket disconnected'));
+    }
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  runGame();
-});
+    // ---------- Drawing (plane disappears on crash) ----------
+    function drawPlane(progress) {
+      if (!canvas.width || !canvas.height) return;
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      // background dots
+      ctx.fillStyle = '#0ea5e9';
+      for (let i = 20; i < h-20; i += h*0.15) {
+        ctx.beginPath(); ctx.arc(15, i, 3, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.fillStyle = '#e2e8f0';
+      for (let i = 40; i < w; i += w*0.1) {
+        ctx.beginPath(); ctx.arc(i, h-15, 3, 0, Math.PI*2); ctx.fill();
+      }
+
+      // If crashed (progress >= 1), don't draw the plane
+      if (progress >= 0.99) return;
+
+      const startX = 15, startY = h - 15;
+      let x = startX + (w * 0.8) * progress;
+      let y = startY - (h * 0.4) * progress;
+      y += Math.sin(Date.now() * 0.01) * 3 * (1 - progress);
+
+      if (planeLoaded) {
+        ctx.save();
+        ctx.translate(x, y);
+        ctx.rotate(-0.3 + progress * 0.2);
+        ctx.drawImage(planeImg, -35, -35, 70, 70);
+        ctx.restore();
+      } else {
+        ctx.fillStyle = 'white';
+        ctx.beginPath(); ctx.moveTo(x, y-15); ctx.lineTo(x+25, y); ctx.lineTo(x, y+15); ctx.fill();
+      }
+
+      // trail
+      if (progress > 0.01) {
+        ctx.beginPath();
+        ctx.moveTo(startX, startY);
+        for (let p = 0; p <= progress; p += 0.05) {
+          let px = startX + (w * 0.8) * p;
+          let py = startY - (h * 0.4) * p;
+          ctx.lineTo(px, py);
+        }
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+      }
+    }
+
+    function animate() {
+      drawPlane(planeProgress);
+      requestAnimationFrame(animate);
+    }
+    animate();
+
+    // ---------- Event listeners ----------
+    document.getElementById('actionBtn').addEventListener('click', async () => {
+      if (gameState.status === 'IN_GAME' && currentBetId && !activeBet.cashedOut) {
+        await cashOut();
+      } else if (gameState.status === 'WAITING') {
+        await placeBet(currentBetAmount);
+      } else {
+        alert('Wait for next round');
+      }
+    });
+    document.getElementById('minusBtn').addEventListener('click', () => {
+      if (currentBetAmount > 5) currentBetAmount -= 5;
+      document.getElementById('betAmount').innerText = currentBetAmount.toFixed(2);
+      updateActionButton();
+    });
+    document.getElementById('plusBtn').addEventListener('click', () => {
+      if (currentBetAmount < 5000) currentBetAmount += 5;
+      document.getElementById('betAmount').innerText = currentBetAmount.toFixed(2);
+      updateActionButton();
+    });
+    document.querySelectorAll('.quickBet').forEach(btn => {
+      btn.addEventListener('click', () => {
+        currentBetAmount = parseFloat(btn.getAttribute('data-amount'));
+        document.getElementById('betAmount').innerText = currentBetAmount.toFixed(2);
+        updateActionButton();
+      });
+    });
+
+    // ---------- Start ----------
+    fetchBalance();
+    fetchHistory();
+    connectWebSocket();
+    setInterval(fetchBalance, 5000);
+  </script>
+</body>
+</html>
