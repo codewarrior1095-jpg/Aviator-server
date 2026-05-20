@@ -1,210 +1,225 @@
 import express from "express";
 import cors from "cors";
 import crypto from "crypto";
-import helmet from "helmet";
-import rateLimit from "express-rate-limit";
 import { Server } from "socket.io";
 import http from "http";
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: ["http://localhost:3000", "http://localhost:5000", "http://127.0.0.1:5500", "http://127.0.0.1:5501"],
-    credentials: true
-  }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
-// ========== SECURITY MIDDLEWARE (keep your existing) ==========
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: "10kb" }));
+app.use(cors());
+app.use(express.json());
 
-const globalLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
-const gameStateLimiter = rateLimit({ windowMs: 1000, max: 30 });
-const verifyLimiter = rateLimit({ windowMs: 60 * 1000, max: 5 });
-app.use("/api/", globalLimiter);
-app.use("/api/game/state", gameStateLimiter);
-app.use("/api/game/verify", verifyLimiter);
+// ------------------------------
+// Simple in‑memory user store
+// ------------------------------
+const users = new Map(); // userId -> { id, username, balance }
+let nextUserId = 1;
 
-// IP Guard (keep your existing ipMap logic – not repeated for brevity, but include it)
-// ... (paste your ipMap code here)
+// Helper: create a user with starting balance
+function createUser(username) {
+  const id = (nextUserId++).toString();
+  const user = { id, username, balance: 5000 };
+  users.set(id, user);
+  return user;
+}
 
-// ========== GAME STATE ==========
+// Pre‑create a demo user so we don't need login for testing
+const demoUser = createUser("player1");
+console.log(`Demo user: id=${demoUser.id}, balance=${demoUser.balance}`);
+
+// ------------------------------
+// Game state
+// ------------------------------
 let gameState = {
-  status: "WAITING",
-  multiplier: 1,
+  status: "WAITING", // WAITING, IN_GAME, CRASHED
+  multiplier: 1.0,
   roundId: 1,
-  crashPoint: 1,
+  crashPoint: 1.0,
   serverSeed: "",
   clientSeed: "",
-  crashPointHash: "",
 };
 
-// ========== CRYPTO (Provably Fair) ==========
-function calculateCrashPoint(serverSeed, clientSeed) {
-  const hash = crypto.createHmac("sha256", serverSeed).update(clientSeed).digest("hex");
+// ------------------------------
+// Provably fair crash point
+// ------------------------------
+function getCrashPointFromHash(hash) {
   const num = parseInt(hash.slice(0, 13), 16);
   const e = Math.pow(2, 52);
   const result = (0.99 * e) / (num + 1);
   return Math.min(28, Math.max(1, parseFloat(result.toFixed(2))));
 }
-function createSeed() { return crypto.randomBytes(32).toString("hex"); }
-function createHash(seed, crash) { return crypto.createHash("sha256").update(`${seed}:${crash}`).digest("hex"); }
-function getClientSeed() { return `CLIENT-${Date.now()}`; }
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ========== REST API ENDPOINTS (unchanged) ==========
-app.get("/api/game/state", (req, res) => {
-  // This endpoint still works for backward compatibility, but frontend will use WebSocket.
-  const response = {
-    status: gameState.status,
-    multiplier: gameState.multiplier,
-    roundId: gameState.roundId,
-    crashPointHash: gameState.crashPointHash,
-  };
-  if (gameState.status === "IN_GAME") {
-    const denom = gameState.crashPoint - 1;
-    let progress = denom > 0 ? (gameState.multiplier - 1) / denom : 0;
-    progress = Math.min(1, Math.max(0, progress));
-    response.progress = progress;
-  } else if (gameState.status === "CRASHED") {
-    response.progress = 1;
-  } else {
-    response.progress = 0;
-  }
-  if (gameState.status === "CRASHED") {
-    response.crashPoint = gameState.crashPoint;
-    response.serverSeed = gameState.serverSeed;
-  }
-  res.setHeader("Cache-Control", "no-store");
-  res.json(response);
+function generateCrashPoint() {
+  const serverSeed = crypto.randomBytes(32).toString("hex");
+  const clientSeed = `client-${Date.now()}`;
+  const hash = crypto.createHmac("sha256", serverSeed).update(clientSeed).digest("hex");
+  const crashPoint = getCrashPointFromHash(hash);
+  return { serverSeed, clientSeed, crashPoint, hash };
+}
+
+// ------------------------------
+// Bets storage (in‑memory)
+// ------------------------------
+let activeBets = []; // for current round: { userId, betId, amount }
+let allBets = [];    // history
+let roundHistory = [];
+
+// ------------------------------
+// API Endpoints (REST)
+// ------------------------------
+
+// Get user balance
+app.get("/api/user/balance", (req, res) => {
+  // For demo, always return demo user balance
+  res.json({ balance: demoUser.balance });
 });
 
-app.get("/api/game/verify/:roundId", (req, res) => {
-  const { serverSeed, clientSeed, crashPoint } = req.query;
-  if (!serverSeed || !clientSeed || !crashPoint)
-    return res.status(400).json({ error: "Missing data" });
-  const calculated = calculateCrashPoint(serverSeed, clientSeed);
-  res.json({
-    roundId: req.params.roundId,
-    calculated,
-    provided: parseFloat(crashPoint),
-    verified: Math.abs(calculated - crashPoint) < 0.01,
+// Place a bet
+app.post("/api/game/bet", (req, res) => {
+  const { amount } = req.body;
+  if (gameState.status !== "WAITING") {
+    return res.status(400).json({ error: "Can only bet before round starts" });
+  }
+  if (amount <= 0 || amount > demoUser.balance) {
+    return res.status(400).json({ error: "Invalid amount or insufficient balance" });
+  }
+  demoUser.balance -= amount;
+  const betId = crypto.randomBytes(8).toString("hex");
+  activeBets.push({
+    betId,
+    userId: demoUser.id,
+    username: demoUser.username,
+    amount,
+    cashedOut: false,
+    cashedOutAt: null,
+    winAmount: null,
   });
+  res.json({ betId, newBalance: demoUser.balance });
 });
 
+// Cash out
+app.post("/api/game/cashout", (req, res) => {
+  const { betId } = req.body;
+  const bet = activeBets.find(b => b.betId === betId);
+  if (!bet) return res.status(404).json({ error: "Bet not found" });
+  if (bet.cashedOut) return res.status(400).json({ error: "Already cashed out" });
+  if (gameState.status !== "IN_GAME") {
+    return res.status(400).json({ error: "Cannot cash out now" });
+  }
+  const winAmount = bet.amount * gameState.multiplier;
+  bet.cashedOut = true;
+  bet.cashedOutAt = Date.now();
+  bet.winAmount = winAmount;
+  demoUser.balance += winAmount;
+  res.json({ winAmount, newBalance: demoUser.balance });
+});
+
+// Game history
+app.get("/api/game/history", (req, res) => {
+  res.json(roundHistory.slice(-20));
+});
+
+// Health check
 app.get("/api/health", (req, res) => {
-  res.json({ status: "ok", uptime: process.uptime() });
+  res.json({ status: "ok", round: gameState.roundId });
 });
 
-// ========== AUTH, BALANCE, BETTING, CASHOUT (keep your existing) ==========
-// I'm assuming you already have these endpoints from previous solutions.
-// If not, you must add them. For brevity, I'm not repeating full JWT auth here,
-// but your existing backend should have them. Below is a minimal placeholder.
-// In production, replace with your real auth/betting logic.
+// ------------------------------
+// Game Loop with WebSocket emits
+// ------------------------------
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-app.post("/api/auth/register", (req, res) => { /* your code */ });
-app.post("/api/auth/login", (req, res) => { /* your code */ });
-app.get("/api/user/balance", (req, res) => { /* your code */ });
-app.post("/api/game/bet", (req, res) => { /* your code */ });
-app.post("/api/game/cashout", (req, res) => { /* your code */ });
-app.get("/api/game/history", (req, res) => { /* your code */ });
+async function runGame() {
+  console.log("🎮 Game engine started (WebSocket mode)");
+  while (true) {
+    // ----- WAITING (4 sec) -----
+    gameState.status = "WAITING";
+    gameState.multiplier = 1.0;
+    // Generate new crash point for this round
+    const { serverSeed, clientSeed, crashPoint, hash } = generateCrashPoint();
+    gameState.crashPoint = crashPoint;
+    gameState.serverSeed = serverSeed;
+    gameState.clientSeed = clientSeed;
+    gameState.crashPointHash = hash;
+    console.log(`Round ${gameState.roundId} crash point = ${crashPoint}x`);
 
-// ========== GAME ENGINE WITH SOCKET.IO EMITS ==========
-async function runGameLoop() {
-  console.log("🎮 GAME ENGINE STARTED (WebSocket mode)");
-  try {
+    io.emit("gameState", {
+      status: "WAITING",
+      roundId: gameState.roundId,
+      crashPointHash: hash,
+      progress: 0,
+    });
+    await sleep(4000);
+
+    // ----- IN_GAME (multiplier increases) -----
+    gameState.status = "IN_GAME";
+    const start = Date.now();
+    activeBets = []; // clear previous round's active bets
+    let lastProgress = -1;
+    let lastMultiplier = -1;
+
     while (true) {
-      // ----- WAITING -----
-      gameState.status = "WAITING";
-      gameState.multiplier = 1;
-      gameState.serverSeed = createSeed();
-      gameState.clientSeed = getClientSeed();
-      gameState.crashPoint = calculateCrashPoint(gameState.serverSeed, gameState.clientSeed);
-      gameState.crashPointHash = createHash(gameState.serverSeed, gameState.crashPoint);
-      console.log(`Round ${gameState.roundId} crash point = ${gameState.crashPoint}`);
-
-      // Emit WAITING state
-      io.emit("gameState", {
-        status: "WAITING",
-        multiplier: 1,
-        roundId: gameState.roundId,
-        crashPointHash: gameState.crashPointHash,
-        progress: 0
-      });
-
-      await sleep(4000);
-
-      // ----- IN_GAME (multiplier increases) -----
-      gameState.status = "IN_GAME";
-      const start = Date.now();
-      let lastMultiplier = 1;
-      let lastProgress = 0;
-
-      while (true) {
-        const t = (Date.now() - start) / 1000;
-        let multiplier = parseFloat(Math.exp(0.085 * t).toFixed(2));
-        if (multiplier >= gameState.crashPoint) {
-          multiplier = gameState.crashPoint;
-          gameState.multiplier = multiplier;
-          // Calculate progress for final moment before crash
-          const denom = gameState.crashPoint - 1;
-          let progress = denom > 0 ? (multiplier - 1) / denom : 1;
-          progress = Math.min(1, Math.max(0, progress));
-          io.emit("multiplierUpdate", {
-            multiplier: multiplier,
-            progress: progress,
-            roundId: gameState.roundId
-          });
-          break;
-        }
+      const elapsed = (Date.now() - start) / 1000;
+      let multiplier = parseFloat(Math.exp(0.085 * elapsed).toFixed(2));
+      if (multiplier >= gameState.crashPoint) {
+        multiplier = gameState.crashPoint;
         gameState.multiplier = multiplier;
-        const denom = gameState.crashPoint - 1;
-        let progress = denom > 0 ? (multiplier - 1) / denom : 0;
-        progress = Math.min(1, Math.max(0, progress));
-        // Only emit if changed to reduce traffic (optional)
-        if (multiplier !== lastMultiplier || progress !== lastProgress) {
-          io.emit("multiplierUpdate", {
-            multiplier: multiplier,
-            progress: progress,
-            roundId: gameState.roundId
-          });
-          lastMultiplier = multiplier;
-          lastProgress = progress;
-        }
-        await sleep(50); // 20 updates per second
+        const progress = 1.0; // fully crashed
+        io.emit("multiplierUpdate", { multiplier, progress, roundId: gameState.roundId });
+        break;
       }
-
-      // ----- CRASHED -----
-      gameState.status = "CRASHED";
-      console.log(`💥 Round ${gameState.roundId} crashed at ${gameState.crashPoint}x`);
-
-      io.emit("gameCrashed", {
-        crashPoint: gameState.crashPoint,
-        roundId: gameState.roundId,
-        serverSeed: gameState.serverSeed,
-        clientSeed: gameState.clientSeed,
-        progress: 1
-      });
-
-      gameState.roundId++;
-      await sleep(3000);
+      gameState.multiplier = multiplier;
+      // progress = (multiplier - 1) / (crashPoint - 1) , but capped
+      let progress = (multiplier - 1) / (gameState.crashPoint - 1);
+      progress = Math.min(1, Math.max(0, progress));
+      if (progress !== lastProgress || multiplier !== lastMultiplier) {
+        io.emit("multiplierUpdate", { multiplier, progress, roundId: gameState.roundId });
+        lastProgress = progress;
+        lastMultiplier = multiplier;
+      }
+      await sleep(50);
     }
-  } catch (err) {
-    console.error("GAME LOOP CRASH:", err);
-    setTimeout(runGameLoop, 2000);
+
+    // ----- CRASHED -----
+    gameState.status = "CRASHED";
+    console.log(`💥 Round ${gameState.roundId} crashed at ${gameState.crashPoint}x`);
+    // For any uncashed bet, they lose (no refund)
+    for (let bet of activeBets) {
+      if (!bet.cashedOut) {
+        bet.winAmount = 0;
+        allBets.push(bet);
+      } else {
+        allBets.push(bet);
+      }
+    }
+    roundHistory.unshift({
+      roundId: gameState.roundId,
+      crashPoint: gameState.crashPoint,
+      timestamp: Date.now(),
+      serverSeed: gameState.serverSeed,
+      clientSeed: gameState.clientSeed,
+    });
+    io.emit("gameCrashed", {
+      crashPoint: gameState.crashPoint,
+      roundId: gameState.roundId,
+      progress: 1,
+      serverSeed: gameState.serverSeed,
+      clientSeed: gameState.clientSeed,
+    });
+    gameState.roundId++;
+    await sleep(3000);
   }
 }
 
 // Socket.IO connection handler
 io.on("connection", (socket) => {
-  console.log("Client connected via WebSocket:", socket.id);
+  console.log("Client connected");
   // Send current game state immediately
-  const denom = gameState.crashPoint - 1;
   let progress = 0;
   if (gameState.status === "IN_GAME") {
-    progress = denom > 0 ? (gameState.multiplier - 1) / denom : 0;
+    progress = (gameState.multiplier - 1) / (gameState.crashPoint - 1);
     progress = Math.min(1, Math.max(0, progress));
   } else if (gameState.status === "CRASHED") {
     progress = 1;
@@ -214,13 +229,12 @@ io.on("connection", (socket) => {
     multiplier: gameState.multiplier,
     roundId: gameState.roundId,
     crashPointHash: gameState.crashPointHash,
-    progress: progress,
-    crashPoint: gameState.status === "CRASHED" ? gameState.crashPoint : undefined
+    progress,
   });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT} (WebSocket ready)`);
-  runGameLoop();
+  console.log(`Server running on port ${PORT}`);
+  runGame();
 });
