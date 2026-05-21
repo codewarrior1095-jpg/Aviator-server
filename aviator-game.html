@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html>
+<head><title>Aviator</title>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+socket.on('round_start', (data) => console.log('Round start', data));
+socket.on('multiplier_update', (data) => console.log('Multiplier', data.multiplier));
+socket.on('crash', (data) => console.log('Crash', data.multiplier));
+</script>
+</head>
+<body><h1>Aviator Game – Server Authoritative</h1><div id="multiplier">1.00x</div></body>
+</html>
