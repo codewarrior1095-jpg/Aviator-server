@@ -1,496 +1,847 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Aviator Clone - UI Match</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
-        
-        body { 
-            font-family: 'Inter', sans-serif; 
-            background-color: #000; 
-            overflow-x: hidden;
-            touch-action: pan-y;
-        }
-
-        .no-scrollbar::-webkit-scrollbar {
-            display: none;
-        }
-        .no-scrollbar {
-            -ms-overflow-style: none;
-            scrollbar-width: none;
-        }
-
-        .panel-bg { background: #1b1c1d; }
-        .input-bg { background: #000000; }
-        .btn-quick { background: #141516; }
-        
-        .switch {
-            position: relative; display: inline-block; width: 34px; height: 18px;
-        }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider {
-            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: #333; transition: .4s; border-radius: 34px; border: 1px solid #555;
-        }
-        .slider:before {
-            position: absolute; content: ""; height: 14px; width: 14px; left: 1px; bottom: 1px;
-            background-color: #fca5a5; transition: .4s; border-radius: 50%;
-        }
-        input:checked + .slider { background-color: #f97316; }
-        input:checked + .slider:before { transform: translateX(16px); background-color: #fff; }
-
-        /* Waiting Overlay */
-        #waitingOverlay {
-            background-color: #0a0b0c;
-        }
-
-        /* Centered container for image and loader */
-        .waiting-content {
-            position: relative;
-            z-index: 10;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 20px;
-        }
-
-        /* Background image - 50% smaller */
-        .waiting-bg-image {
-            width: 150px;
-            height: 150px;
-            background-image: url('background.png');
-            background-size: cover;
-            background-position: center;
-            background-repeat: no-repeat;
-            border-radius: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        /* Thinner pill-shaped loader */
-        .pill-loader {
-            position: relative;
-            width: 200px;
-            height: 4px;
-            background: rgba(20, 20, 30, 0.8);
-            border-radius: 30px;
-            overflow: hidden;
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.5);
-        }
-
-        .pill-loader::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: -50%;
-            width: 50%;
-            height: 100%;
-            background: linear-gradient(90deg, transparent, #eab308, #fbbf24, #eab308, transparent);
-            animation: slidePass 1.5s ease-in-out infinite;
-            border-radius: 30px;
-            box-shadow: 0 0 15px #eab308;
-        }
-
-        @keyframes slidePass {
-            0% {
-                left: -50%;
-            }
-            100% {
-                left: 100%;
-            }
-        }
-
-        .pill-loader::after {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            border-radius: 30px;
-            box-shadow: inset 0 0 10px rgba(234, 179, 8, 0.4);
-            animation: pulse 1.5s ease-in-out infinite;
-        }
-
-        @keyframes pulse {
-            0%, 100% { opacity: 0.3; }
-            50% { opacity: 0.8; }
-        }
-
-        /* Hide multiplier during waiting */
-        #ui-layer.waiting-state #multiplierDisplay,
-        #ui-layer.waiting-state #statusText {
-            opacity: 0 !important;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Aviator - Real-Time Crash Game</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  * {
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  
+  body {
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    overflow-x: hidden;
+  }
+  
+  @keyframes slideUp {
+    from {
+      opacity: 0;
+      transform: translateY(20px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.05); opacity: 0.8; }
+  }
+  
+  @keyframes cashoutPulse {
+    0%, 100% { 
+      background: linear-gradient(135deg, #f97316, #ea580c);
+      transform: scale(1);
+    }
+    50% { 
+      background: linear-gradient(135deg, #ea580c, #c2410c);
+      transform: scale(1.02);
+    }
+  }
+  
+  .multiplier-text {
+    text-shadow: 0 0 30px rgba(249, 115, 22, 0.5);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  
+  .cashout-button {
+    animation: cashoutPulse 1s ease-in-out infinite !important;
+  }
+  
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.95);
+    backdrop-filter: blur(10px);
+    color: white;
+    padding: 12px 24px;
+    border-radius: 50px;
+    font-weight: 600;
+    z-index: 1000;
+    animation: slideUp 0.3s ease;
+    pointer-events: none;
+    white-space: nowrap;
+    font-size: 14px;
+  }
+  
+  .toast.success {
+    border-left: 4px solid #22c55e;
+  }
+  
+  .toast.error {
+    border-left: 4px solid #ef4444;
+  }
+  
+  .bet-item {
+    transition: all 0.2s ease;
+    animation: slideUp 0.3s ease;
+  }
+  
+  .bet-item:hover {
+    background: rgba(249, 115, 22, 0.1);
+    transform: translateX(4px);
+  }
+  
+  .connection-status {
+    position: fixed;
+    top: 15px;
+    right: 15px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    z-index: 100;
+    box-shadow: 0 0 10px currentColor;
+  }
+  
+  .connected {
+    background: #22c55e;
+    color: #22c55e;
+    box-shadow: 0 0 10px #22c55e;
+    animation: pulse 2s infinite;
+  }
+  
+  .disconnected {
+    background: #ef4444;
+    color: #ef4444;
+    box-shadow: 0 0 10px #ef4444;
+  }
+  
+  canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    cursor: pointer;
+  }
+  
+  /* Hide scrollbar */
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  
+  .hide-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+</style>
 </head>
-<body class="text-white select-none antialiased flex justify-center w-full">
+<body>
 
-    <audio id="aviator_sound" src="aviator_sound.mp3" loop></audio>
-
-    <div class="w-full max-w-md bg-[#0a0b0c] min-h-screen flex flex-col relative pb-10">
-
-        <div class="flex items-center justify-between px-3 py-2 bg-[#101112] border-b border-gray-800">
-            <div class="flex items-center font-black text-xl text-orange-500 italic tracking-tighter leading-none">
-                <span class="text-2xl">AVIATOR</span>
-                <span class="text-[10px] ml-1 text-orange-400 font-bold not-italic translate-y-1">EXTRA<br>BET</span>
-            </div>
-            <div class="flex items-center gap-3">
-                <span class="text-green-500 font-bold text-lg tracking-tight">2,000.00</span>
-                <div class="p-1 cursor-pointer">
-                    <svg class="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
-                </div>
-            </div>
+<div class="min-h-screen flex items-center justify-center p-3">
+  <div class="max-w-md w-full bg-black/30 backdrop-blur-sm rounded-2xl shadow-2xl overflow-hidden">
+    
+    <!-- Connection Status -->
+    <div class="connection-status disconnected" id="connectionStatus"></div>
+    
+    <!-- Header -->
+    <div class="bg-gradient-to-r from-orange-600 to-red-600 px-5 py-4">
+      <div class="flex justify-between items-center">
+        <div>
+          <div class="text-2xl font-black tracking-tighter text-white drop-shadow-lg">
+            ✈️ AVIATOR
+          </div>
+          <div class="text-xs text-orange-100 mt-1">Real-Time Crash Game</div>
         </div>
-
-        <div class="flex items-center px-2 py-1.5 bg-[#0b0c0d] overflow-x-auto no-scrollbar gap-2 text-xs font-bold w-full border-b border-gray-900 whitespace-nowrap" id="history">
-            <span class="text-purple-500 bg-[#1a1120] px-2 py-0.5 rounded-full border border-purple-900/50">2.26x</span>
-            <span class="text-purple-500 bg-[#1a1120] px-2 py-0.5 rounded-full border border-purple-900/50">3.33x</span>
-            <span class="text-blue-400 bg-[#101622] px-2 py-0.5 rounded-full border border-blue-900/50">1.33x</span>
-            <span class="text-blue-400 bg-[#101622] px-2 py-0.5 rounded-full border border-blue-900/50">1.31x</span>
-            <span class="text-blue-400 bg-[#101622] px-2 py-0.5 rounded-full border border-blue-900/50">1.07x</span>
-            <span class="text-purple-500 bg-[#1a1120] px-2 py-0.5 rounded-full border border-purple-900/50">3.94x</span>
-            <span class="text-pink-500 bg-[#20101b] px-2 py-0.5 rounded-full border border-pink-900/50">28.09x</span>
-            <div class="flex items-center justify-center bg-gray-800 rounded-full px-2 py-0.5 ml-auto opacity-70 cursor-pointer">
-                <svg class="w-3 h-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            </div>
+        <div class="text-right">
+          <div class="text-xs text-orange-100">BALANCE</div>
+          <div class="text-2xl font-bold text-white" id="balance">10,000</div>
         </div>
-
-        <div class="p-2 w-full">
-            <div class="relative w-full aspect-[4/2.5] rounded-xl border-2 border-gray-800 bg-[#060b13] overflow-hidden shadow-lg">
-                
-                <div id="ui-layer" class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none z-10">
-                    <h1 id="multiplierDisplay" class="text-5xl sm:text-7xl font-black text-white drop-shadow-md">1.00x</h1>
-                    <p id="statusText" class="text-sm font-bold uppercase tracking-wider text-red-500 mt-2 opacity-0 transition-opacity bg-black/50 px-3 py-1 rounded-full">Flew Away!</p>
-                </div>
-
-                <div id="waitingOverlay" class="absolute inset-0 flex items-center justify-center z-20 hidden">
-                    <div class="waiting-content">
-                        <div class="waiting-bg-image"></div>
-                        <div class="pill-loader"></div>
-                    </div>
-                </div>
-
-                <canvas id="gameCanvas" class="block w-full h-full"></canvas>
-            </div>
-        </div>
-
-        <div class="flex flex-col gap-2 px-2 pb-2">
-            
-            <div class="panel-bg rounded-xl p-2 pb-3">
-                <div class="flex justify-between items-center mb-2 px-1">
-                    <div class="flex bg-[#0b0c0d] rounded-full text-xs font-semibold overflow-hidden p-0.5">
-                        <button class="bg-gray-700 text-white px-5 py-1.5 rounded-full">Bet</button>
-                        <button class="text-gray-400 px-5 py-1.5 rounded-full">Auto</button>
-                    </div>
-                    <div class="flex items-center gap-2 text-xs text-gray-400 font-semibold">
-                        <span>Extra Bet</span>
-                        <label class="switch">
-                            <input type="checkbox">
-                            <span class="slider"></span>
-                        </label>
-                        <div class="bg-gray-700 text-gray-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] cursor-pointer">?</div>
-                    </div>
-                </div>
-                
-                <div class="flex gap-2 h-[80px]">
-                    <div class="flex flex-col gap-1 w-5/12">
-                        <div class="input-bg flex items-center justify-between rounded-full px-2 py-1 border border-gray-800">
-                            <button class="w-6 h-6 rounded-full border border-gray-600 flex items-center justify-center text-gray-300 hover:bg-gray-800 font-bold"> - </button>
-                            <span class="font-bold text-lg">0.10</span>
-                            <button class="w-6 h-6 rounded-full border border-gray-600 flex items-center justify-center text-gray-300 hover:bg-gray-800 font-bold"> + </button>
-                        </div>
-                        <div class="grid grid-cols-2 gap-1 text-xs font-bold text-gray-400">
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.10</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.20</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.50</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">1.00</button>
-                        </div>
-                    </div>
-                    <button class="w-7/12 bg-[#28a909] hover:bg-[#2fb90d] active:bg-[#208707] transition-colors rounded-[14px] flex flex-col items-center justify-center text-white font-bold shadow-[inset_0_-3px_0_rgba(0,0,0,0.2)] border border-[#30cc0b] cursor-pointer" onclick="document.getElementById('aviator_sound').play().catch(e=>{})">
-                        <span class="text-xl tracking-wide uppercase shadow-sm">Bet</span>
-                        <span class="text-lg leading-tight">0.10</span>
-                    </button>
-                </div>
-            </div>
-
-            <div class="panel-bg rounded-xl p-2 pb-3">
-                <div class="flex justify-between items-center mb-2 px-1">
-                    <div class="flex bg-[#0b0c0d] rounded-full text-xs font-semibold overflow-hidden p-0.5">
-                        <button class="bg-gray-700 text-white px-5 py-1.5 rounded-full">Bet</button>
-                        <button class="text-gray-400 px-5 py-1.5 rounded-full">Auto</button>
-                    </div>
-                    <div class="flex items-center gap-2 text-xs text-gray-400 font-semibold">
-                        <span>Extra Bet</span>
-                        <label class="switch">
-                            <input type="checkbox">
-                            <span class="slider"></span>
-                        </label>
-                        <div class="bg-gray-700 text-gray-300 rounded-full w-4 h-4 flex items-center justify-center text-[10px] cursor-pointer">?</div>
-                    </div>
-                </div>
-                
-                <div class="flex gap-2 h-[80px]">
-                    <div class="flex flex-col gap-1 w-5/12">
-                        <div class="input-bg flex items-center justify-between rounded-full px-2 py-1 border border-gray-800">
-                            <button class="w-6 h-6 rounded-full border border-gray-600 flex items-center justify-center text-gray-300 hover:bg-gray-800 font-bold"> - </button>
-                            <span class="font-bold text-lg">0.10</span>
-                            <button class="w-6 h-6 rounded-full border border-gray-600 flex items-center justify-center text-gray-300 hover:bg-gray-800 font-bold"> + </button>
-                        </div>
-                        <div class="grid grid-cols-2 gap-1 text-xs font-bold text-gray-400">
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.10</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.20</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">0.50</button>
-                            <button class="btn-quick rounded-full py-1 border border-transparent hover:border-gray-700">1.00</button>
-                        </div>
-                    </div>
-                    <button class="w-7/12 bg-[#28a909] hover:bg-[#2fb90d] active:bg-[#208707] transition-colors rounded-[14px] flex flex-col items-center justify-center text-white font-bold shadow-[inset_0_-3px_0_rgba(0,0,0,0.2)] border border-[#30cc0b] cursor-pointer" onclick="document.getElementById('aviator_sound').play().catch(e=>{})">
-                        <span class="text-xl tracking-wide uppercase shadow-sm">Bet</span>
-                        <span class="text-lg leading-tight">0.10</span>
-                    </button>
-                </div>
-            </div>
-
-        </div>
-
-        <div class="px-2 pb-4">
-            <div class="panel-bg rounded-xl overflow-hidden flex flex-col min-h-[150px]">
-                <div class="flex bg-[#101112] text-xs font-semibold border-b border-gray-800">
-                    <button class="flex-1 py-3 text-white border-b-2 border-orange-500 bg-[#1a1b1d]">All Bets</button>
-                    <button class="flex-1 py-3 text-gray-500 hover:text-gray-300">My Bets</button>
-                    <button class="flex-1 py-3 text-gray-500 hover:text-gray-300">Top</button>
-                </div>
-                <div class="flex justify-between items-center p-3">
-                    <div class="leading-tight">
-                        <div class="text-[11px] font-bold text-gray-400">ALL BETS</div>
-                        <div class="text-lg font-bold">0</div>
-                    </div>
-                    <button class="flex items-center gap-1 text-[11px] font-bold text-gray-400 bg-transparent border border-gray-700 rounded-full px-3 py-1 hover:bg-gray-800">
-                        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-                        Previous hand
-                    </button>
-                </div>
-                <div class="flex px-3 pb-2 text-[10px] text-gray-500 font-bold uppercase">
-                    <div class="w-1/3 text-left">User</div>
-                    <div class="w-1/3 text-center">Bet X</div>
-                    <div class="w-1/3 text-right">Cash out</div>
-                </div>
-            </div>
-        </div>
-
+      </div>
     </div>
+    
+    <!-- History Bar -->
+    <div class="bg-black/50 px-3 py-2 overflow-x-auto whitespace-nowrap hide-scrollbar border-b border-gray-800">
+      <div id="historyBar" class="flex gap-2">
+        <div class="text-gray-500 text-xs">Waiting for game...</div>
+      </div>
+    </div>
+    
+    <!-- Canvas Area -->
+    <div class="p-3">
+      <div class="relative rounded-xl overflow-hidden bg-gradient-to-b from-gray-900 to-black">
+        <canvas id="gameCanvas" width="800" height="500" style="width: 100%; height: auto;"></canvas>
+        
+        <!-- UI Overlay -->
+        <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+          <div id="multiplierDisplay" class="text-6xl md:text-7xl font-black text-white multiplier-text drop-shadow-lg">
+            1.00x
+          </div>
+          <div id="gameStatus" class="text-sm font-bold uppercase tracking-wider text-red-500 mt-2 opacity-0 transition-opacity bg-black/50 px-4 py-1 rounded-full">
+            CRASHED!
+          </div>
+        </div>
+        
+        <!-- Waiting Overlay -->
+        <div id="waitingOverlay" class="absolute inset-0 bg-black/90 backdrop-blur-sm flex items-center justify-center hidden">
+          <div class="text-center">
+            <div class="text-5xl mb-3 animate-bounce">✈️</div>
+            <div class="text-white font-bold text-lg mb-2">NEXT FLIGHT</div>
+            <div class="w-48 h-1.5 bg-gray-700 rounded-full overflow-hidden mx-auto">
+              <div class="h-full bg-gradient-to-r from-orange-500 to-red-500 rounded-full animate-pulse" style="width: 100%;"></div>
+            </div>
+            <div class="text-gray-400 text-sm mt-3">Place your bets before takeoff!</div>
+          </div>
+        </div>
+        
+        <!-- Live Stats -->
+        <div class="absolute bottom-3 left-3 right-3 flex justify-between items-center">
+          <div class="bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs">
+            <span class="text-gray-400">Players:</span>
+            <span class="text-orange-500 font-bold ml-1" id="playersOnline">0</span>
+          </div>
+          <div class="bg-black/60 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs">
+            <span class="text-gray-400">Active Bets:</span>
+            <span class="text-green-500 font-bold ml-1" id="activeBets">0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Betting Panel -->
+    <div class="p-3 space-y-3">
+      <div class="bg-gray-900/50 rounded-xl p-3">
+        <div class="flex gap-3">
+          <div class="flex-1">
+            <div class="bg-black/50 rounded-lg p-2">
+              <div class="flex items-center justify-between">
+                <button id="betMinus" class="w-10 h-10 rounded-full bg-gray-800 text-orange-500 font-bold text-xl hover:bg-gray-700 transition active:scale-95">-</button>
+                <span id="betAmount" class="text-2xl font-bold text-white">10</span>
+                <button id="betPlus" class="w-10 h-10 rounded-full bg-gray-800 text-orange-500 font-bold text-xl hover:bg-gray-700 transition active:scale-95">+</button>
+              </div>
+            </div>
+            <div class="grid grid-cols-4 gap-1 mt-2">
+              <button class="quick-bet bg-gray-800 text-gray-300 rounded-lg py-2 text-sm font-bold hover:bg-gray-700 transition active:scale-95" data-amount="10">10</button>
+              <button class="quick-bet bg-gray-800 text-gray-300 rounded-lg py-2 text-sm font-bold hover:bg-gray-700 transition active:scale-95" data-amount="25">25</button>
+              <button class="quick-bet bg-gray-800 text-gray-300 rounded-lg py-2 text-sm font-bold hover:bg-gray-700 transition active:scale-95" data-amount="50">50</button>
+              <button class="quick-bet bg-gray-800 text-gray-300 rounded-lg py-2 text-sm font-bold hover:bg-gray-700 transition active:scale-95" data-amount="100">100</button>
+            </div>
+          </div>
+          
+          <button id="actionButton" class="bg-gradient-to-r from-green-600 to-green-500 text-white font-bold rounded-xl px-6 py-3 shadow-lg flex flex-col items-center justify-center min-w-[120px] transition active:scale-95">
+            <span class="text-xs uppercase tracking-wide">BET</span>
+            <span class="text-xl font-black" id="actionButtonAmount">10</span>
+          </button>
+        </div>
+      </div>
+      
+      <!-- Tabs -->
+      <div class="bg-gray-900/50 rounded-xl overflow-hidden">
+        <div class="flex border-b border-gray-800">
+          <button class="tab-btn flex-1 py-3 text-sm font-bold transition-all" data-tab="all">
+            <span class="text-gray-400">📊 ALL BETS</span>
+          </button>
+          <button class="tab-btn flex-1 py-3 text-sm font-bold transition-all" data-tab="my">
+            <span class="text-gray-400">👤 MY BETS</span>
+          </button>
+        </div>
+        
+        <div id="betsList" class="max-h-96 overflow-y-auto hide-scrollbar">
+          <div class="text-center text-gray-500 py-8 text-sm">No bets yet</div>
+        </div>
+      </div>
+    </div>
+    
+  </div>
+</div>
 
-    <script>
-        const canvas = document.getElementById('gameCanvas');
-        const ctx = canvas.getContext('2d');
-        const mDisplay = document.getElementById('multiplierDisplay');
-        const statusText = document.getElementById('statusText');
-        const waitingOverlay = document.getElementById('waitingOverlay');
-        const uiLayer = document.getElementById('ui-layer');
-        const bgSound = document.getElementById('aviator_sound');
-
-        let state = 'WAITING'; 
-        let multiplier = 1.00;
-        let startTime = 0;
-        let crashPoint = 0;
-        let pathPoints = [];
-        let crashStartTime = 0;
-        let lastInGamePos = { x: 0, y: 0 };
-
-        function resize() {
-            canvas.width = canvas.offsetWidth * window.devicePixelRatio;
-            canvas.height = canvas.offsetHeight * window.devicePixelRatio;
+<script>
+// ==================== FRONTEND GAME CLIENT ====================
+class AviatorGame {
+  constructor() {
+    this.socket = null;
+    this.connected = false;
+    this.gameActive = false;
+    this.currentMultiplier = 1.00;
+    this.crashPoint = 1.00;
+    this.playerBalance = 10000;
+    this.currentBet = null;
+    this.bets = [];
+    this.myBets = [];
+    this.players = new Map();
+    this.activeTab = 'all';
+    this.playerName = this.generatePlayerName();
+    this.totalWin = 0;
+    
+    // Canvas animation
+    this.canvas = document.getElementById('gameCanvas');
+    this.ctx = this.canvas.getContext('2d');
+    this.planeX = 50;
+    this.planeY = 300;
+    this.trailPoints = [];
+    this.animationId = null;
+    this.lastTimestamp = 0;
+    
+    // DOM elements
+    this.multiplierDisplay = document.getElementById('multiplierDisplay');
+    this.gameStatus = document.getElementById('gameStatus');
+    this.waitingOverlay = document.getElementById('waitingOverlay');
+    this.balanceEl = document.getElementById('balance');
+    this.activeBetsEl = document.getElementById('activeBets');
+    this.playersOnlineEl = document.getElementById('playersOnline');
+    this.actionButton = document.getElementById('actionButton');
+    this.actionButtonAmount = document.getElementById('actionButtonAmount');
+    this.betAmountSpan = document.getElementById('betAmount');
+    this.betsListEl = document.getElementById('betsList');
+    this.historyBar = document.getElementById('historyBar');
+    this.connectionStatus = document.getElementById('connectionStatus');
+    
+    this.currentBetAmount = 10;
+    this.roundHistory = [];
+    
+    this.init();
+  }
+  
+  generatePlayerName() {
+    const names = ['Alpha', 'Bravo', 'Delta', 'Eagle', 'Falcon', 'Hawk', 'Jet', 'Phoenix'];
+    return `${names[Math.floor(Math.random() * names.length)]}_${Math.floor(Math.random() * 1000)}`;
+  }
+  
+  init() {
+    this.setupCanvas();
+    this.setupEventListeners();
+    this.connectWebSocket();
+    this.startAnimation();
+  }
+  
+  setupCanvas() {
+    const resizeCanvas = () => {
+      const container = this.canvas.parentElement;
+      const width = container.clientWidth;
+      const height = width * 0.625;
+      this.canvas.width = width;
+      this.canvas.height = height;
+      this.canvas.style.width = `${width}px`;
+      this.canvas.style.height = `${height}px`;
+    };
+    
+    window.addEventListener('resize', resizeCanvas);
+    setTimeout(resizeCanvas, 100);
+  }
+  
+  setupEventListeners() {
+    // Bet amount controls
+    document.getElementById('betMinus').addEventListener('click', () => {
+      if (this.currentBetAmount > 10) {
+        this.currentBetAmount = Math.max(10, this.currentBetAmount - 5);
+        this.updateBetAmount();
+      }
+    });
+    
+    document.getElementById('betPlus').addEventListener('click', () => {
+      if (this.currentBetAmount < 5000) {
+        this.currentBetAmount = Math.min(5000, this.currentBetAmount + 5);
+        this.updateBetAmount();
+      }
+    });
+    
+    document.querySelectorAll('.quick-bet').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.currentBetAmount = parseFloat(btn.dataset.amount);
+        this.updateBetAmount();
+      });
+    });
+    
+    // Action button (Bet/Cashout)
+    this.actionButton.addEventListener('click', () => {
+      if (this.gameActive && this.currentBet && !this.currentBet.cashedOut) {
+        this.cashout();
+      } else if (!this.currentBet) {
+        this.placeBet();
+      }
+    });
+    
+    // Tabs
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.activeTab = btn.dataset.tab;
+        this.renderBetsList();
+        
+        // Update tab styles
+        document.querySelectorAll('.tab-btn').forEach(b => {
+          if (b.dataset.tab === this.activeTab) {
+            b.classList.add('bg-orange-600', 'text-white');
+            b.classList.remove('bg-transparent');
+          } else {
+            b.classList.remove('bg-orange-600', 'text-white');
+            b.classList.add('bg-transparent');
+          }
+        });
+      });
+    });
+  }
+  
+  updateBetAmount() {
+    this.betAmountSpan.textContent = this.currentBetAmount.toFixed(2);
+    this.actionButtonAmount.textContent = this.currentBetAmount.toFixed(2);
+  }
+  
+  connectWebSocket() {
+    this.socket = io({
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000
+    });
+    
+    this.socket.on('connect', () => {
+      console.log('Connected to server');
+      this.connected = true;
+      this.connectionStatus.className = 'connection-status connected';
+      this.socket.emit('register_player', { name: this.playerName, balance: this.playerBalance });
+      this.showToast('Connected to game server!', 'success');
+    });
+    
+    this.socket.on('disconnect', () => {
+      console.log('Disconnected from server');
+      this.connected = false;
+      this.connectionStatus.className = 'connection-status disconnected';
+      this.showToast('Connection lost! Reconnecting...', 'error');
+    });
+    
+    this.socket.on('game_state', (data) => {
+      this.gameActive = data.gameActive;
+      this.currentMultiplier = data.currentMultiplier;
+      this.crashPoint = data.crashPoint;
+      this.updateMultiplierDisplay();
+      this.activeBetsEl.textContent = data.activeBets;
+      this.playersOnlineEl.textContent = data.playersOnline;
+      
+      if (data.roundHistory) {
+        this.roundHistory = data.roundHistory;
+        this.updateHistoryBar();
+      }
+      
+      if (!data.gameActive) {
+        this.waitingOverlay.classList.remove('hidden');
+      } else {
+        this.waitingOverlay.classList.add('hidden');
+      }
+    });
+    
+    this.socket.on('round_start', (data) => {
+      console.log('Round started, crash at:', data.crashPoint);
+      this.gameActive = true;
+      this.crashPoint = data.crashPoint;
+      this.currentMultiplier = 1.00;
+      this.updateMultiplierDisplay();
+      this.waitingOverlay.classList.add('hidden');
+      this.gameStatus.style.opacity = '0';
+      this.multiplierDisplay.classList.remove('text-red-500');
+      this.multiplierDisplay.classList.add('text-white');
+      this.updateActionButton();
+      this.clearTrail();
+    });
+    
+    this.socket.on('multiplier_update', (data) => {
+      if (this.gameActive) {
+        this.currentMultiplier = data.multiplier;
+        this.updateMultiplierDisplay();
+        this.updatePlanePosition();
+        this.updateActionButton();
+        
+        if (this.currentBet && !this.currentBet.cashedOut) {
+          const potentialWin = this.currentBet.amount * this.currentMultiplier;
+          this.actionButtonAmount.textContent = potentialWin.toFixed(2);
         }
-        window.addEventListener('resize', resize);
-        resize();
-
-        function startWaiting() {
-            state = 'WAITING';
-            bgSound.pause();
-            bgSound.currentTime = 0;
-            waitingOverlay.classList.remove('hidden');
-            uiLayer.classList.add('waiting-state');
-            statusText.style.opacity = '0';
-            mDisplay.innerText = "1.00x";
-            mDisplay.classList.remove('text-red-500');
-            mDisplay.classList.add('text-white');
-            pathPoints = [];
-            setTimeout(() => {
-                waitingOverlay.classList.add('hidden');
-                uiLayer.classList.remove('waiting-state');
-                startGame();
-            }, 5000);
+      }
+    });
+    
+    this.socket.on('crash', (data) => {
+      console.log('Crashed at:', data.multiplier);
+      this.gameActive = false;
+      this.currentMultiplier = data.multiplier;
+      this.updateMultiplierDisplay();
+      this.multiplierDisplay.classList.remove('text-white');
+      this.multiplierDisplay.classList.add('text-red-500');
+      this.gameStatus.style.opacity = '1';
+      
+      if (this.currentBet && !this.currentBet.cashedOut) {
+        this.showToast(`Crashed at ${data.multiplier.toFixed(2)}x! You lost your bet.`, 'error');
+        this.currentBet = null;
+      }
+      
+      this.updateActionButton();
+      
+      // Show waiting overlay after crash
+      setTimeout(() => {
+        if (!this.gameActive) {
+          this.waitingOverlay.classList.remove('hidden');
         }
+      }, 1000);
+    });
+    
+    this.socket.on('player_registered', (data) => {
+      this.playerBalance = data.balance;
+      this.updateBalanceDisplay();
+    });
+    
+    this.socket.on('bet_placed', (data) => {
+      this.addBetToList(data);
+      this.activeBetsEl.textContent = parseInt(this.activeBetsEl.textContent) + 1;
+      
+      if (data.playerId === this.socket.id) {
+        this.currentBet = {
+          amount: data.amount,
+          cashedOut: false,
+          placedAt: Date.now()
+        };
+        this.playerBalance -= data.amount;
+        this.updateBalanceDisplay();
+        this.updateActionButton();
+        this.showToast(`Bet placed: $${data.amount.toFixed(2)}`, 'success');
+      }
+    });
+    
+    this.socket.on('player_cashed_out', (data) => {
+      this.updateBetCashout(data.playerId, data.multiplier, data.winAmount);
+      
+      if (data.playerId === this.socket.id) {
+        this.currentBet.cashedOut = true;
+        this.playerBalance += data.winAmount;
+        this.totalWin += data.winAmount;
+        this.updateBalanceDisplay();
+        this.updateActionButton();
+        this.showToast(`Cashed out at ${data.multiplier.toFixed(2)}x! Won $${data.winAmount.toFixed(2)}`, 'success');
+      }
+    });
+    
+    this.socket.on('active_bets_update', (bets) => {
+      this.activeBets = bets;
+      this.activeBetsEl.textContent = bets.length;
+      if (this.activeTab === 'all') {
+        this.renderBetsList();
+      }
+    });
+    
+    this.socket.on('players_online', (count) => {
+      this.playersOnlineEl.textContent = count;
+    });
+    
+    this.socket.on('history_update', (history) => {
+      this.roundHistory = history;
+      this.updateHistoryBar();
+    });
+  }
+  
+  placeBet() {
+    if (!this.gameActive) {
+      this.showToast('Cannot place bet - round not active!', 'error');
+      return;
+    }
+    
+    if (this.currentBet) {
+      this.showToast('You already have an active bet!', 'error');
+      return;
+    }
+    
+    if (this.currentBetAmount > this.playerBalance) {
+      this.showToast('Insufficient balance!', 'error');
+      return;
+    }
+    
+    this.socket.emit('place_bet', { amount: this.currentBetAmount }, (response) => {
+      if (!response.success) {
+        this.showToast(response.error, 'error');
+      }
+    });
+  }
+  
+  cashout() {
+    if (!this.currentBet || this.currentBet.cashedOut) return;
+    
+    this.socket.emit('cashout', { multiplier: this.currentMultiplier }, (response) => {
+      if (!response.success) {
+        this.showToast(response.error, 'error');
+      }
+    });
+  }
+  
+  updateActionButton() {
+    if (this.gameActive && this.currentBet && !this.currentBet.cashedOut) {
+      this.actionButton.className = 'bg-gradient-to-r from-orange-600 to-red-600 text-white font-bold rounded-xl px-6 py-3 shadow-lg flex flex-col items-center justify-center min-w-[120px] transition active:scale-95 cashout-button';
+      this.actionButton.querySelector('span:first-child').textContent = 'CASHOUT';
+    } else if (!this.currentBet && this.gameActive) {
+      this.actionButton.className = 'bg-gradient-to-r from-green-600 to-green-500 text-white font-bold rounded-xl px-6 py-3 shadow-lg flex flex-col items-center justify-center min-w-[120px] transition active:scale-95';
+      this.actionButton.querySelector('span:first-child').textContent = 'BET';
+      this.actionButtonAmount.textContent = this.currentBetAmount.toFixed(2);
+    } else {
+      this.actionButton.className = 'bg-gray-600 text-gray-300 font-bold rounded-xl px-6 py-3 shadow-lg flex flex-col items-center justify-center min-w-[120px] cursor-not-allowed';
+      this.actionButton.querySelector('span:first-child').textContent = this.gameActive ? 'BET' : 'WAITING';
+    }
+  }
+  
+  updateMultiplierDisplay() {
+    this.multiplierDisplay.textContent = `${this.currentMultiplier.toFixed(2)}x`;
+  }
+  
+  updateBalanceDisplay() {
+    this.balanceEl.textContent = this.playerBalance.toFixed(2);
+  }
+  
+  addBetToList(bet) {
+    this.bets.unshift({
+      playerId: bet.playerId,
+      playerName: bet.playerName,
+      amount: bet.amount,
+      timestamp: bet.timestamp,
+      cashedOut: false,
+      multiplier: null,
+      winAmount: null
+    });
+    
+    if (bet.playerId === this.socket.id) {
+      this.myBets.unshift({
+        amount: bet.amount,
+        timestamp: bet.timestamp,
+        cashedOut: false
+      });
+    }
+    
+    if (this.bets.length > 50) this.bets.pop();
+    if (this.myBets.length > 50) this.myBets.pop();
+    
+    this.renderBetsList();
+  }
+  
+  updateBetCashout(playerId, multiplier, winAmount) {
+    const bet = this.bets.find(b => b.playerId === playerId && !b.cashedOut);
+    if (bet) {
+      bet.cashedOut = true;
+      bet.multiplier = multiplier;
+      bet.winAmount = winAmount;
+    }
+    
+    if (playerId === this.socket.id) {
+      const myBet = this.myBets.find(b => !b.cashedOut);
+      if (myBet) {
+        myBet.cashedOut = true;
+        myBet.multiplier = multiplier;
+        myBet.winAmount = winAmount;
+      }
+    }
+    
+    this.renderBetsList();
+  }
+  
+  renderBetsList() {
+    const betsToShow = this.activeTab === 'all' ? this.bets : this.myBets;
+    
+    if (betsToShow.length === 0) {
+      this.betsListEl.innerHTML = '<div class="text-center text-gray-500 py-8 text-sm">No bets yet</div>';
+      return;
+    }
+    
+    this.betsListEl.innerHTML = betsToShow.slice(0, 30).map(bet => {
+      const isMyBet = bet.playerId === this.socket.id || this.activeTab === 'my';
+      const status = bet.cashedOut ? 
+        `<span class="text-green-500">${bet.multiplier.toFixed(2)}x</span>` : 
+        '<span class="text-yellow-500">Active</span>';
+      
+      const winDisplay = bet.cashedOut ? 
+        `<span class="text-green-500 font-bold">+$${bet.winAmount.toFixed(2)}</span>` : 
+        `<span class="text-gray-500">Pending</span>`;
+      
+      return `
+        <div class="bet-item flex justify-between items-center px-3 py-2 border-b border-gray-800 text-sm">
+          <div class="flex-1">
+            <div class="font-semibold text-white">${isMyBet ? 'You' : bet.playerName}</div>
+            <div class="text-xs text-gray-500">$${bet.amount.toFixed(2)}</div>
+          </div>
+          <div class="flex-1 text-center">
+            ${status}
+          </div>
+          <div class="flex-1 text-right">
+            ${winDisplay}
+          </div>
+        </div>
+      `;
+    }).join('');
+  }
+  
+  updateHistoryBar() {
+    if (this.roundHistory.length === 0) {
+      this.historyBar.innerHTML = '<div class="text-gray-500 text-xs">Waiting for game...</div>';
+      return;
+    }
+    
+    this.historyBar.innerHTML = this.roundHistory.slice(0, 15).map(round => `
+      <div class="inline-block px-3 py-1 rounded-full bg-gray-800 text-orange-500 font-bold text-xs whitespace-nowrap">
+        ${round.crashPoint.toFixed(2)}x
+      </div>
+    `).join('');
+  }
+  
+  showToast(message, type) {
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => {
+      toast.style.opacity = '0';
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
+  }
+  
+  // ==================== CANVAS ANIMATION ====================
+  updatePlanePosition() {
+    // Calculate plane position based on multiplier progress
+    const maxMultiplier = this.crashPoint;
+    const progress = Math.min(1, (this.currentMultiplier - 1) / (maxMultiplier - 1));
+    
+    // Map progress to canvas coordinates
+    const maxX = this.canvas.width - 100;
+    const maxY = 50;
+    const startX = 50;
+    const startY = this.canvas.height - 80;
+    
+    // Exponential curve for realistic flight path
+    const t = Math.pow(progress, 0.7);
+    this.planeX = startX + (maxX - startX) * t;
+    this.planeY = startY - (startY - maxY) * Math.pow(t, 1.2);
+    
+    // Add wobble effect
+    const wobble = Math.sin(Date.now() * 0.008) * 8 * (1 - t);
+    this.planeY += wobble;
+    
+    // Store trail point
+    if (progress > 0.01 && this.gameActive) {
+      this.trailPoints.push({ x: this.planeX, y: this.planeY });
+      if (this.trailPoints.length > 100) this.trailPoints.shift();
+    }
+  }
+  
+  clearTrail() {
+    this.trailPoints = [];
+    this.planeX = 50;
+    this.planeY = this.canvas.height - 80;
+  }
+  
+  drawPlane() {
+    const size = 40;
+    this.ctx.save();
+    this.ctx.translate(this.planeX, this.planeY);
+    
+    // Rotation based on flight path
+    const angle = Math.atan2(-this.planeY + (this.canvas.height - 80), this.planeX - 50) * 0.5;
+    this.ctx.rotate(angle);
+    
+    // Draw plane glow
+    this.ctx.shadowBlur = 20;
+    this.ctx.shadowColor = '#f97316';
+    
+    // Draw plane body
+    this.ctx.fillStyle = '#f97316';
+    this.ctx.beginPath();
+    this.ctx.moveTo(size/2, 0);
+    this.ctx.lineTo(-size/3, -size/4);
+    this.ctx.lineTo(-size/3, size/4);
+    this.ctx.fill();
+    
+    // Draw wings
+    this.ctx.fillStyle = '#ea580c';
+    this.ctx.beginPath();
+    this.ctx.moveTo(0, -size/6);
+    this.ctx.lineTo(-size/2, -size/3);
+    this.ctx.lineTo(-size/3, -size/6);
+    this.ctx.fill();
+    
+    this.ctx.beginPath();
+    this.ctx.moveTo(0, size/6);
+    this.ctx.lineTo(-size/2, size/3);
+    this.ctx.lineTo(-size/3, size/6);
+    this.ctx.fill();
+    
+    this.ctx.shadowBlur = 0;
+    this.ctx.restore();
+  }
+  
+  drawTrail() {
+    if (this.trailPoints.length < 2) return;
+    
+    this.ctx.beginPath();
+    this.ctx.moveTo(this.trailPoints[0].x, this.trailPoints[0].y);
+    
+    for (let i = 1; i < this.trailPoints.length; i++) {
+      this.ctx.lineTo(this.trailPoints[i].x, this.trailPoints[i].y);
+    }
+    
+    this.ctx.strokeStyle = '#f97316';
+    this.ctx.lineWidth = 3;
+    this.ctx.shadowBlur = 10;
+    this.ctx.shadowColor = '#f97316';
+    this.ctx.stroke();
+    
+    // Fill trail area
+    this.ctx.lineTo(this.trailPoints[this.trailPoints.length - 1].x, this.canvas.height);
+    this.ctx.lineTo(this.trailPoints[0].x, this.canvas.height);
+    this.ctx.fillStyle = 'rgba(249, 115, 22, 0.1)';
+    this.ctx.fill();
+    
+    this.ctx.shadowBlur = 0;
+  }
+  
+  drawBackground() {
+    // Gradient background
+    const gradient = this.ctx.createLinearGradient(0, 0, 0, this.canvas.height);
+    gradient.addColorStop(0, '#0a0e1a');
+    gradient.addColorStop(1, '#0f1420');
+    this.ctx.fillStyle = gradient;
+    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    
+    // Draw grid lines
+    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    this.ctx.lineWidth = 1;
+    for (let i = 0; i < 10; i++) {
+      const y = (this.canvas.height / 10) * i;
+      this.ctx.beginPath();
+      this.ctx.moveTo(0, y);
+      this.ctx.lineTo(this.canvas.width, y);
+      this.ctx.stroke();
+    }
+    
+    // Draw multiplier markers
+    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    this.ctx.font = 'bold 12px monospace';
+    for (let mult = 1; mult <= 10; mult++) {
+      const x = 50 + ((this.canvas.width - 100) * ((mult - 1) / 9));
+      this.ctx.fillText(`${mult}x`, x - 10, this.canvas.height - 10);
+    }
+  }
+  
+  drawCurrentMultiplier() {
+    // Draw multiplier on canvas as well
+    this.ctx.font = 'bold 24px monospace';
+    this.ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+    this.ctx.shadowBlur = 0;
+    this.ctx.fillText(`${this.currentMultiplier.toFixed(2)}x`, 20, 50);
+  }
+  
+  animate() {
+    if (!this.ctx) return;
+    
+    this.drawBackground();
+    this.drawTrail();
+    this.drawPlane();
+    this.drawCurrentMultiplier();
+    
+    this.animationId = requestAnimationFrame(() => this.animate());
+  }
+  
+  startAnimation() {
+    this.animate();
+  }
+}
 
-        function startGame() {
-            state = 'IN_GAME';
-            bgSound.play().catch(e => console.log("Audio waiting for user interaction"));
-            multiplier = 1.00;
-            crashPoint = Math.max(1, (0.99 / (1 - Math.random()))).toFixed(2);
-            startTime = performance.now();
-            requestAnimationFrame(update);
-        }
-
-        function crash() {
-            state = 'CRASHED';
-            crashStartTime = performance.now();
-            statusText.style.opacity = '1';
-            mDisplay.classList.remove('text-white');
-            mDisplay.classList.add('text-red-500');
-            setTimeout(startWaiting, 2500);
-        }
-
-        function update(now) {
-            if (state === 'WAITING') {
-                draw(0, now);
-                requestAnimationFrame(update);
-                return;
-            }
-            const elapsed = (now - startTime) / 1000;
-
-            if (state === 'IN_GAME') {
-                multiplier = Math.pow(Math.E, 0.07 * elapsed);
-                if (multiplier >= crashPoint) {
-                    multiplier = parseFloat(crashPoint);
-                    crash();
-                }
-            }
-            mDisplay.innerText = multiplier.toFixed(2) + 'x';
-            draw(elapsed, now);
-            requestAnimationFrame(update);
-        }
-
-        function drawRays(ctx, w, h, now) {
-            ctx.save();
-            ctx.translate(w / 2, h + 100); 
-            ctx.rotate(now * 0.0002);
-            const numRays = 24;
-            const angleStep = (Math.PI * 2) / numRays;
-            
-            for (let i = 0; i < numRays; i++) {
-                ctx.beginPath();
-                ctx.moveTo(0, 0);
-                ctx.arc(0, 0, w * 2, i * angleStep, (i + 0.5) * angleStep);
-                ctx.lineTo(0, 0);
-                ctx.fillStyle = 'rgba(255, 255, 255, 0.015)';
-                ctx.fill();
-            }
-            ctx.restore();
-        }
-
-        function drawPlane(ctx) {
-            ctx.save();
-            ctx.fillStyle = '#ff6b00';
-            
-            ctx.beginPath();
-            ctx.moveTo(35, 0);
-            ctx.lineTo(10, -6);
-            ctx.lineTo(-5, -6);
-            ctx.lineTo(-20, -22);
-            ctx.lineTo(-28, -22);
-            ctx.lineTo(-22, -2);
-            ctx.lineTo(-30, 2);
-            ctx.lineTo(-22, 6);
-            ctx.lineTo(-10, 6);
-            ctx.lineTo(-18, 20);
-            ctx.lineTo(-5, 18);
-            ctx.lineTo(10, 6);
-            ctx.closePath();
-            ctx.fill();
-
-            ctx.fillStyle = '#fff';
-            ctx.beginPath();
-            ctx.moveTo(15, -2);
-            ctx.lineTo(8, -5);
-            ctx.lineTo(0, -5);
-            ctx.lineTo(5, -2);
-            ctx.fill();
-
-            ctx.shadowBlur = 10;
-            ctx.shadowColor = '#ff6b00';
-            ctx.stroke();
-
-            ctx.restore();
-        }
-
-        function draw(t, now) {
-            const w = canvas.width;
-            const h = canvas.height;
-            const paddingX = w * 0.05;
-            const paddingY = h * 0.1;
-            
-            ctx.clearRect(0, 0, w, h);
-            
-            drawRays(ctx, w, h, now);
-
-            ctx.fillStyle = '#0ea5e9';
-            for(let i = 20; i < h - 20; i += h * 0.15) {
-                ctx.beginPath(); ctx.arc(15, i, 3, 0, Math.PI*2); ctx.fill();
-            }
-            ctx.fillStyle = '#e2e8f0';
-            for(let i = 40; i < w; i += w * 0.1) {
-                ctx.beginPath(); ctx.arc(i, h - 15, 3, 0, Math.PI*2); ctx.fill();
-            }
-
-            if (state === 'WAITING') return;
-
-            let tx, ty;
-            const startX = 15;
-            const startY = h - 15;
-
-            if (state === 'IN_GAME') {
-                tx = startX + (w * 0.8) * (1 - Math.exp(-t / 4));
-                const baseTy = startY - (h * 0.7) * (1 - Math.exp(-t / 5));
-                const wobble = Math.sin(t * 2) * (15 * Math.exp(-t / 10));
-                ty = baseTy + wobble;
-                
-                lastInGamePos = { x: tx, y: ty };
-                pathPoints.push({ x: tx, y: ty });
-            } else {
-                const dt = (now - crashStartTime) / 1000;
-                tx = lastInGamePos.x + (dt * 1500);
-                ty = lastInGamePos.y - (dt * 800);
-            }
-
-            if (pathPoints.length > 1) {
-                ctx.beginPath();
-                ctx.moveTo(pathPoints[0].x, startY);
-                for (let p of pathPoints) ctx.lineTo(p.x, p.y);
-                if (state === 'IN_GAME') ctx.lineTo(tx, startY);
-                else ctx.lineTo(lastInGamePos.x, startY);
-                ctx.closePath();
-                
-                const grad = ctx.createLinearGradient(0, ty, 0, startY);
-                grad.addColorStop(0, 'rgba(249, 115, 22, 0.4)');
-                grad.addColorStop(1, 'rgba(249, 115, 22, 0)');
-                ctx.fillStyle = grad;
-                ctx.fill();
-
-                ctx.beginPath();
-                ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
-                for (let p of pathPoints) ctx.lineTo(p.x, p.y);
-                ctx.strokeStyle = '#f97316';
-                ctx.lineWidth = 5;
-                ctx.lineJoin = 'round';
-                ctx.stroke();
-            }
-
-            if (tx < w + 100) {
-                ctx.save();
-                ctx.translate(tx, ty);
-                const angle = state === 'IN_GAME' ? -0.25 + (Math.cos(t * 2) * 0.05) : -0.3;
-                ctx.rotate(angle);
-                drawPlane(ctx);
-                ctx.restore();
-            }
-        }
-
-        startWaiting();
-    </script>
+// Initialize game when page loads
+const game = new AviatorGame();
+</script>
 </body>
 </html>
